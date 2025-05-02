@@ -1,0 +1,82 @@
+import sglang as sgl
+import time
+import torch
+
+spec_algorithm = "LOOKAHEAD"  # [None, "EAGLE", "EAGLE3", "LOOKAHEAD"]
+
+def main():
+    # Sample prompts.
+    prompts = [
+        # "Juan asked his neighbor, Herb, how much his house was worth. Herb answered that he paid $76,000 for the house. If Juan's house is 30% less expensive than Herb's, calculate the value of the two houses combined.",
+        "Mike decides he wants to replace his movie collection with digital versions.  He has 600 movies.  A third of the movies are in various series and he knows he can get those for only $6 of the cost of a normal movie by just buying the series together.  40% of the remaining movies are older movies which are $5.  How much does replacing the movies cost if a normal movie costs $10?",
+    ]
+
+    # Create a sampling params object.
+    sampling_params = {
+        "n": 1,
+        "temperature": 0.6,
+        # "repetition_penalty": 1,
+        "max_new_tokens": 2048,
+        # "top_k": 1,
+    }
+    # Set speculative args based on algorithm
+    speculative_args = {}
+    if spec_algorithm == "EAGLE3":
+        speculative_args = {
+            "speculative_algorithm": "EAGLE3",
+            "speculative_draft_model_path": "/nobackup/model/eagle-sgl/sglang-EAGLE3-DeepSeek-R1-Distill-LLaMA-8B",
+            "speculative_num_steps": 8,
+            "speculative_eagle_topk": 8,
+            "speculative_num_draft_tokens": 64,
+        }
+    elif spec_algorithm == "EAGLE":
+        speculative_args = {
+            "speculative_algorithm": "EAGLE",
+            "speculative_draft_model_path": "/nobackup/model/eagle-sgl/sglang-EAGLE-DeepSeek-R1-Distill-LLaMA-8B",
+            "speculative_num_steps": 8,
+            "speculative_eagle_topk": 8,
+            "speculative_num_draft_tokens": 64,
+        }
+    elif spec_algorithm == "LOOKAHEAD":
+        speculative_args = {
+            "speculative_algorithm": "LOOKAHEAD",
+            "speculative_num_draft_tokens": 8,
+            "speculative_lookahead_one_branch": True,
+        }
+
+    # Create an LLM.
+    llm = sgl.Engine(
+        model_path="/nobackup/model/deepseek-r1/DeepSeek-R1-Distill-Llama-8B",
+        dtype="float16",
+        cuda_graph_max_bs=8,
+        tp_size=1,
+        **speculative_args,
+    )
+
+    for idx in range(50):
+        torch.cuda.synchronize()
+        start = time.time()
+        outputs = llm.generate(prompts, sampling_params)
+        torch.cuda.synchronize()
+        cos = time.time() - start
+        completion_tokens = 0
+        verify_tokens = 0
+
+        # Print the outputs.
+        for prompt, output in zip(prompts, outputs):
+            completion_tokens += output["meta_info"]["completion_tokens"]
+            has_verify = "spec_verify_ct" in output["meta_info"]
+            if has_verify:
+                verify_tokens += output["meta_info"]["spec_verify_ct"]
+            else:
+                verify_tokens += output["meta_info"]["completion_tokens"]
+            print(f"{output["meta_info"]}")
+            print("======================" * 3)
+        accept_length = completion_tokens / verify_tokens if verify_tokens > 0 else 1.0
+        print(f"Run:{idx + 1}, {spec_algorithm}, Accept length: {accept_length:.3f}, TPS =: {completion_tokens/cos}\n\n")
+
+
+# The __main__ condition is necessary here because we use "spawn" to create subprocesses
+# Spawn starts a fresh program every time, if there is no __main__, it will run into infinite loop to keep spawning processes from sgl.Engine
+if __name__ == "__main__":
+    main()

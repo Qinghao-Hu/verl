@@ -1,0 +1,4 @@
+[submodule "third-party/sglang"]
+	path = third-party/sglang
+	url = https://github.com/Qinghao-Hu/sglang.git
+	branch = fastrl
