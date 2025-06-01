@@ -1,8 +1,9 @@
-import sglang as sgl
 import time
-import torch
 
-spec_algorithm = "LOOKAHEAD"  # [None, "EAGLE", "EAGLE3", "LOOKAHEAD"]
+import torch
+from sglang.srt.entrypoints.engine import Engine
+
+spec_algorithm = "EAGLE3"  # [None, "EAGLE", "EAGLE3", "LOOKAHEAD"]
 
 def main():
     # Sample prompts.
@@ -45,7 +46,7 @@ def main():
         }
 
     # Create an LLM.
-    llm = sgl.Engine(
+    llm = Engine(
         model_path="/nobackup/model/deepseek-r1/DeepSeek-R1-Distill-Llama-8B",
         dtype="float16",
         cuda_graph_max_bs=8,
