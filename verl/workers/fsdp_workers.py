@@ -207,7 +207,11 @@ class ActorRolloutRefWorker(Worker):
             torch_dtype = PrecisionType.to_dtype(torch_dtype)
 
         # override model kwargs
-        actor_model_config = AutoConfig.from_pretrained(local_path, trust_remote_code=trust_remote_code)
+        actor_model_config = AutoConfig.from_pretrained(local_path, trust_remote_code=trust_remote_code, attn_implementation="flash_attention_2")
+                
+        # patch for kimi-vl
+        if getattr(actor_model_config, "model_type", None) == "kimi_vl":
+            actor_model_config.text_config.topk_method = "greedy"
 
         self.generation_config = get_generation_config(local_path, trust_remote_code=trust_remote_code)
 
@@ -235,7 +239,6 @@ class ActorRolloutRefWorker(Worker):
                 pretrained_model_name_or_path=local_path,
                 torch_dtype=torch_dtype,
                 config=actor_model_config,
-                attn_implementation="flash_attention_2",
                 trust_remote_code=trust_remote_code,
             )
 
@@ -445,86 +448,39 @@ class ActorRolloutRefWorker(Worker):
             )
             log_gpu_memory_usage("After building sharding manager", logger=logger)
 
-        elif rollout_name == "sglang":
-            if self.config.rollout.mode == "sync":
-                from verl.workers.rollout.sglang_rollout import SGLangRollout
-
-                # NOTE(linjunrong): Due to recent fp8 support in SGLang. Now importing any symbol relate to
-                # SGLang's model_runner would check CUDA device capability. However, due to verl's setting,
-                # the main process of ray can not find any CUDA device, which would potentially lead to:
-                # "RuntimeError: No CUDA GPUs are available".
-                # For this reason, sharding_manager.__init__ should not import FSDPSGLangShardingManager and
-                # we import it here use the abs path.
-                # check: https://github.com/sgl-project/sglang/blob/00f42707eaddfc2c0528e5b1e0094025c640b7a0/python/sglang/srt/layers/quantization/fp8_utils.py#L76
-                from verl.workers.sharding_manager.fsdp_sglang import FSDPSGLangShardingManager
-
-                log_gpu_memory_usage(f"Before building {rollout_name} rollout", logger=logger)
-                local_path = copy_to_local(self.config.model.path)
-                rollout = SGLangRollout(
-                    actor_module=local_path,
-                    config=self.config.rollout,
-                    tokenizer=self.tokenizer,
-                    model_hf_config=self.actor_model_config,
-                    trust_remote_code=trust_remote_code,
+        elif rollout_name in ["sglang", "sglang_async"]:
+            if rollout_name == "sglang_async":
+                warnings.warn(
+                    "'sglang_async' has been deprecated and merged into 'sglang'. "
+                    "Please use 'sglang' going forward.",
+                    DeprecationWarning,
+                    stacklevel=2,
                 )
-                log_gpu_memory_usage(f"After building {rollout_name} rollout", logger=logger)
+            from verl.workers.rollout.sglang_rollout import SGLangRollout
+            # NOTE(linjunrong): Due to recent fp8 support in SGLang. Now importing any symbol relate to
+            # SGLang's model_runner would check CUDA device capability. However, due to verl's setting,
+            # the main process of ray can not find any CUDA device, which would potentially lead to:
+            # "RuntimeError: No CUDA GPUs are available".
+            # For this reason, sharding_manager.__init__ should not import FSDPSGLangShardingManager and
+            # we import it here use the abs path.
+            # check: https://github.com/sgl-project/sglang/blob/00f42707eaddfc2c0528e5b1e0094025c640b7a0/python/sglang/srt/layers/quantization/fp8_utils.py#L76
 
-                if torch.distributed.get_world_size() == 1:
-                    self.config.rollout.load_format = "dummy_hf"
-                rollout_sharding_manager = FSDPSGLangShardingManager(
-                    module=self.actor_module_fsdp,
-                    inference_engine=rollout.inference_engine,
-                    model_config=self.actor_model_config,
-                    full_params="hf" in self.config.rollout.load_format,
-                    device_mesh=rollout_device_mesh,
-                    offload_param=self._is_offload_param,
-                )
-                log_gpu_memory_usage("After building sharding manager", logger=logger)
-            elif self.config.rollout.mode == "async":
-                from verl.workers.rollout.sglang_rollout import AsyncSGLangRollout
-                from verl.workers.sharding_manager.fsdp_sglang import FSDPAsyncSGLangShardingManager
-
-                local_path = copy_to_local(self.config.model.path)
-                log_gpu_memory_usage(f"Before building {rollout_name} rollout", logger=None)
-                rollout = AsyncSGLangRollout(
-                    actor_module=local_path,
-                    config=self.config.rollout,
-                    tokenizer=self.tokenizer,
-                    model_hf_config=self.actor_model_config,
-                    trust_remote_code=trust_remote_code,
-                )
-                log_gpu_memory_usage(f"After building {rollout_name} rollout", logger=None)
-
-                if torch.distributed.get_world_size() == 1:
-                    self.config.rollout.load_format = "dummy_hf"
-                rollout_sharding_manager = FSDPAsyncSGLangShardingManager(
-                    module=self.actor_module_fsdp,
-                    inference_engine=rollout._engine,
-                    model_config=self.actor_model_config,
-                    full_params="hf" in self.config.rollout.load_format,
-                    device_mesh=rollout_device_mesh,
-                    offload_param=self._is_offload_param,
-                )
-                log_gpu_memory_usage("After building sharding manager", logger=None)
-        elif rollout_name == "sglang_async":
-            # TODO replace by rollout.mode == "async"
-            from verl.workers.rollout.sglang_rollout import AsyncSGLangRollout
-            from verl.workers.sharding_manager.fsdp_sglang import FSDPAsyncSGLangShardingManager
+            from verl.workers.sharding_manager.fsdp_sglang import FSDPSGLangShardingManager
 
             local_path = copy_to_local(self.config.model.path)
-            log_gpu_memory_usage(f"Before building {rollout_name} rollout", logger=None)
-            rollout = AsyncSGLangRollout(
+            log_gpu_memory_usage(f"Before building {rollout_name} rollout", logger=logger)
+            rollout = SGLangRollout(
                 actor_module=local_path,
                 config=self.config.rollout,
                 tokenizer=self.tokenizer,
                 model_hf_config=self.actor_model_config,
                 trust_remote_code=trust_remote_code,
             )
-            log_gpu_memory_usage(f"After building {rollout_name} rollout", logger=None)
+            log_gpu_memory_usage(f"After building {rollout_name} rollout", logger=logger)
 
             if torch.distributed.get_world_size() == 1:
                 self.config.rollout.load_format = "dummy_hf"
-            rollout_sharding_manager = FSDPAsyncSGLangShardingManager(
+            rollout_sharding_manager = FSDPSGLangShardingManager(
                 module=self.actor_module_fsdp,
                 inference_engine=rollout._engine,
                 model_config=self.actor_model_config,
@@ -532,7 +488,7 @@ class ActorRolloutRefWorker(Worker):
                 device_mesh=rollout_device_mesh,
                 offload_param=self._is_offload_param,
             )
-            log_gpu_memory_usage("After building sharding manager", logger=None)
+            log_gpu_memory_usage("After building sharding manager", logger=logger)
 
         else:
             raise NotImplementedError(f"Rollout name: {self.config.rollout.name} is not supported")
@@ -693,16 +649,8 @@ class ActorRolloutRefWorker(Worker):
             log_gpu_memory_usage("After entering rollout sharding manager", logger=logger)
 
             prompts = self.rollout_sharding_manager.preprocess_data(prompts)
-
-            if self.config.rollout.name == "sglang_async":
-                from verl.workers.rollout.sglang_rollout import AsyncSGLangRollout
-
-                if isinstance(self.rollout, AsyncSGLangRollout) and hasattr(self.rollout, "_tool_schemas") and len(self.rollout._tool_schemas) > 0:
-                    output = self.rollout.generate_sequences_with_tools(prompts=prompts)
-                else:
-                    output = self.rollout.generate_sequences(prompts=prompts)
-            else:
-                output = self.rollout.generate_sequences(prompts=prompts)
+            output = self.rollout.generate_sequences(prompts=prompts)
+            
             log_gpu_memory_usage("After rollout generation", logger=logger)
 
             output = self.rollout_sharding_manager.postprocess_data(output)
@@ -921,8 +869,11 @@ class CriticWorker(Worker):
 
         from transformers import AutoConfig, AutoModelForTokenClassification
 
-        critic_model_config = AutoConfig.from_pretrained(local_path, trust_remote_code=config.model.get("trust_remote_code", False))
+        critic_model_config = AutoConfig.from_pretrained(local_path, attn_implementation="flash_attention_2", trust_remote_code=config.model.get("trust_remote_code", False))
         critic_model_config.num_labels = 1
+        # patch for kimi-vl
+        if getattr(critic_model_config, "model_type", None) == "kimi_vl":
+            critic_model_config.text_config.topk_method = "greedy"
 
         init_context = get_init_weight_context_manager(use_meta_tensor=not critic_model_config.tie_word_embeddings, mesh=self.device_mesh)
 
@@ -934,7 +885,6 @@ class CriticWorker(Worker):
                 pretrained_model_name_or_path=local_path,
                 torch_dtype=torch_dtype,
                 config=critic_model_config,
-                attn_implementation="flash_attention_2",
                 trust_remote_code=config.model.get("trust_remote_code", False),
             )
 
@@ -1470,7 +1420,8 @@ class RewardModelWorker(Worker):
 
         # https://pytorch.org/docs/stable/notes/fsdp.html#fsdp-notes
         # unshard the root FSDP module
-        self.reward_module._handle.reshard(True)
+        if self.world_size > 1 and fsdp_version(self.reward_module) == 1:
+            self.reward_module._handle.reshard(True)
 
         output = output.to("cpu")
         return output
