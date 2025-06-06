@@ -44,7 +44,7 @@ from verl.utils.memory_buffer import (
     build_memory_reference_from_module,
     get_weight_buffer_meta_from_module,
 )
-from verl.utils.torch_functional import check_cuda_is_available
+from verl.utils.torch_functional import check_device_is_available
 from verl.utils.vllm_utils import patch_vllm_moe_model_weight_loader
 
 from .base import BaseShardingManager
@@ -264,7 +264,7 @@ _MICRO_DATA_PARALLEL_GROUP = None
 
 
 class MegatronVLLMShardingManager(BaseShardingManager):
-    @check_cuda_is_available()
+    @check_device_is_available()
     def __init__(
         self,
         actor_module: nn.ModuleList,
@@ -331,8 +331,9 @@ class MegatronVLLMShardingManager(BaseShardingManager):
             info = f"vLLM load weights, loaded_params: {len(loaded_params)}"
             logger.info(info)
 
-            if "tags" in inspect.signature(self.inference_engine.wake_up).parameters:
-                self.inference_engine.wake_up(tags=["kv_cache"])
+            # (vermouth1992) We move wake up kv cache after we release model weights. Need refactor to make API cleaner
+            # if "tags" in inspect.signature(self.inference_engine.wake_up).parameters:
+            #     self.inference_engine.wake_up(tags=["kv_cache"])
 
     @GPUMemoryLogger(role="megatron vllm sharding_manager", logger=logger)
     def __exit__(self, exc_type, exc_value, traceback):
