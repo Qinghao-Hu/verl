@@ -1,0 +1,32 @@
+# Example configuration for using the elastic scheduler with SGLang
+
+model:
+  path: "/nobackup/model/deepseek-r1/DeepSeek-R1-Distill-Llama-8B"
+
+rollout:
+  name: "sglang"  # or "vllm"
+  tensor_model_parallel_size: 2
+  # Use the elastic scheduler instead of the default one
+  chat_scheduler: "verl.workers.rollout.elastic_scheduler.ElasticChatCompletionScheduler"
+
+# Elastic scaling configuration (passed via scheduler_kwargs)
+elastic_scaling:
+  low_threshold: 8          # Scale down when all workers have < 8 requests
+  high_threshold: 16        # Scale up when any worker has > 16 requests  
+  monitor_interval: 1.0     # Check load every 1 second
+  scale_cooldown: 10.0      # Wait 10 seconds between scaling operations
+
+# Example usage in Python:
+# 
+# from omegaconf import OmegaConf
+# from verl.workers.rollout.async_server import AsyncLLMServerManager
+# 
+# config = OmegaConf.load("elastic_config_example.yaml")
+# 
+# scheduler_kwargs = config.get("elastic_scaling", {})
+# 
+# manager = AsyncLLMServerManager(
+#     config=config,
+#     worker_group=worker_group,
+#     scheduler_kwargs=scheduler_kwargs
+# ) 

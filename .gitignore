@@ -7,7 +7,7 @@ slurm/*
 **/*.ckpt
 **/outputs
 **/*.tar.gz
-**/playground
+# **/playground
 **/wandb
 
 # Byte-compiled / optimized / DLL files
