@@ -1513,3 +1513,28 @@ class AsyncActorRolloutRefWorker(ActorRolloutRefWorker):
         await self.rollout.sleep()
         # return something to block the caller
         return True
+
+    @register(dispatch_mode=Dispatch.DIRECT_ROLLOUT_METHOD)
+    async def get_num_running_requests(self):
+        """Get the number of running requests from the rollout backend."""
+        try:
+            # For sglang backend, try to get running requests
+            if hasattr(self.rollout, "get_num_running_requests"):
+                return await self.rollout.get_num_running_requests()
+            elif hasattr(self.rollout, "engine") and hasattr(self.rollout.engine, "get_num_running_requests"):
+                return await self.rollout.engine.get_num_running_requests()
+            elif hasattr(self.rollout, "engine") and hasattr(self.rollout.engine, "scheduler"):
+                # For sglang, try to get running request count from scheduler
+                scheduler = self.rollout.engine.scheduler
+                if hasattr(scheduler, "get_num_running_reqs"):
+                    return scheduler.get_num_running_reqs()
+                elif hasattr(scheduler, "waiting") and hasattr(scheduler, "running"):
+                    # Count running and waiting requests
+                    running_count = len(getattr(scheduler, "running", []))
+                    waiting_count = len(getattr(scheduler, "waiting", []))
+                    return running_count + waiting_count
+            # Fallback: return 0 if we can't get the count
+            return 0
+        except Exception as e:
+            print(f"Error getting running requests count: {e}")
+            return 0

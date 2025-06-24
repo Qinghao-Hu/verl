@@ -282,6 +282,9 @@ class ChatCompletionScheduler:
             module = importlib.import_module(module_path)
             self.completion_callback = getattr(module, class_name)(config, self)
 
+        print(f"Tony weighted_addresses: {self.weighted_addresses}")
+        print(f"Tony request_id_to_address: {self.request_id_to_address}")
+
     def submit_chat_completions(self, *, messages: List[Dict[str, str]], request_id: str, info: Dict[str, Any]):
         """Submit chat completion request without wait, completion_callback will be called when the request is done.
 
@@ -381,6 +384,24 @@ class ChatCompletionScheduler:
             kwargs["temperature"] = self.config.val_kwargs.temperature
 
         print(f"[ChatCompletionScheduler] generate_sequences sampling params: {kwargs}")
+        print(f"[ChatCompletionScheduler] generate_sequences batch: {batch}")
+
+        # # Save batch to file for debugging
+        # import os
+        # import pickle
+
+        # debug_dir = "debug_batches"
+        # os.makedirs(debug_dir, exist_ok=True)
+
+        # # Generate unique filename with timestamp
+        # filename = os.path.join(debug_dir, f"batch_vllm.pkl")
+
+        # # Save batch object to file
+        # with open(filename, "wb") as f:
+        #     pickle.dump(batch, f)
+
+        # print(f"[ChatCompletionScheduler] Saved batch to {filename}")
+        # # exit()
 
         # NOTE: For multi-turn rollout, repeat raw_prompt n times and process each prompt independently,
         # validation dataset has already been repeated in `PPOTrainer._validate`.

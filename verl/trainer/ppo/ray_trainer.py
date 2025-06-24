@@ -39,23 +39,22 @@ from tqdm import tqdm
 from verl import DataProto
 from verl.protocol import pad_dataproto_to_divisor, unpad_dataproto
 from verl.single_controller.base import Worker
-from verl.single_controller.ray import RayClassWithInitArgs, RayResourcePool, RayWorkerGroup
+from verl.single_controller.ray import (RayClassWithInitArgs, RayResourcePool,
+                                        RayWorkerGroup)
 from verl.single_controller.ray.base import create_colocated_worker_cls
 from verl.trainer.ppo import core_algos
 from verl.trainer.ppo.core_algos import AdvantageEstimator, agg_loss
-from verl.trainer.ppo.metric_utils import (
-    compute_data_metrics,
-    compute_throughout_metrics,
-    compute_timing_metrics,
-    process_validation_metrics,
-)
+from verl.trainer.ppo.metric_utils import (compute_data_metrics,
+                                           compute_throughout_metrics,
+                                           compute_timing_metrics,
+                                           process_validation_metrics)
 from verl.trainer.ppo.reward import compute_reward, compute_reward_async
-from verl.utils.checkpoint.checkpoint_manager import BaseCheckpointManager, find_latest_ckpt_path
+from verl.utils.checkpoint.checkpoint_manager import (BaseCheckpointManager,
+                                                      find_latest_ckpt_path)
 from verl.utils.debug import marked_timer
-from verl.utils.metric import (
-    reduce_metrics,
-)
-from verl.utils.seqlen_balancing import get_seqlen_balanced_partitions, log_seqlen_unbalance
+from verl.utils.metric import reduce_metrics
+from verl.utils.seqlen_balancing import (get_seqlen_balanced_partitions,
+                                         log_seqlen_unbalance)
 from verl.utils.torch_functional import masked_mean
 from verl.utils.tracking import ValidationGenerationsLogger
 
@@ -74,6 +73,7 @@ class Role(Enum):
     RefPolicy = 4
     RewardModel = 5
     ActorRolloutRef = 6
+    Drafter = 7
 
 
 @dataclass
@@ -86,7 +86,7 @@ class ResourcePoolManager:
     mapping: dict[Role, str]
     resource_pool_dict: dict[str, RayResourcePool] = field(default_factory=dict)
 
-    def create_resource_pool(self):
+    def create_resource_pool(self, merge_into_global_pool: bool = False, global_pool_id: str = "global_pool"):
         for resource_pool_name, process_on_nodes in self.resource_pool_spec.items():
             # max_colocate_count means the number of WorkerGroups (i.e. processes) in each RayResourcePool
             # For FSDP backend, we recommend using max_colocate_count=1 that merge all WorkerGroups into one.
@@ -96,6 +96,11 @@ class ResourcePoolManager:
             self.resource_pool_dict[resource_pool_name] = resource_pool
 
         self._check_resource_available()
+
+        if merge_into_global_pool:
+            assert len(self.resource_pool_dict) == 2, "Only support merge global pool and drafter pool"
+            pool_values = list(self.resource_pool_dict.values())
+            self.resource_pool_dict[global_pool_id] = merge_resource_pool(pool_values[0], pool_values[1])
 
     def get_resource_pool(self, role: Role) -> RayResourcePool:
         """Get the resource pool of the worker_cls"""
@@ -481,7 +486,8 @@ class RayPPOTrainer:
         if train_sampler is None:
             train_sampler = create_rl_sampler(self.config.data, self.train_dataset)
         if collate_fn is None:
-            from verl.utils.dataset.rl_dataset import collate_fn as default_collate_fn
+            from verl.utils.dataset.rl_dataset import \
+                collate_fn as default_collate_fn
 
             collate_fn = default_collate_fn
 
@@ -600,6 +606,10 @@ class RayPPOTrainer:
             if self.config.reward_model.enable and test_batch[0].non_tensor_batch["reward_model"]["style"] == "model":
                 return {}
 
+            # # Wake up all workers for validation if elastic scheduling is enabled
+            # if hasattr(self.actor_rollout_wg, 'wake_up_all_workers'):
+            #     asyncio.run(self.actor_rollout_wg.wake_up_all_workers())
+
             # Store original inputs
             input_ids = test_batch.batch["input_ids"]
             # TODO: Can we keep special tokens except for padding tokens?
@@ -695,6 +705,16 @@ class RayPPOTrainer:
                     pfx = f"{metric_sec}/{data_source}/{var_name}/{metric_name}"
                     metric_dict[pfx] = metric_val
 
+        # # Resume elastic scheduling after validation
+        # if hasattr(self.actor_rollout_wg, 'resume_elastic_scheduling'):
+        #     asyncio.run(self.actor_rollout_wg.resume_elastic_scheduling())
+
+        # # Add elastic metrics if available
+        # if hasattr(self.actor_rollout_wg, 'get_elastic_metrics'):
+        #     elastic_metrics = self.actor_rollout_wg.get_elastic_metrics()
+        #     for key, value in elastic_metrics.items():
+        #         metric_dict[f"elastic/{key}"] = value
+
         return metric_dict
 
     def init_workers(self):
@@ -785,6 +805,12 @@ class RayPPOTrainer:
                 config=self.config,
                 worker_group=self.actor_rollout_wg,
             )
+
+        # # Initialize elastic scheduling if enabled
+        # elastic_config = getattr(self.config, 'elastic_config', None)
+        # if elastic_config and hasattr(self.actor_rollout_wg, 'start_elastic_scheduling'):
+        #     logger.info("Starting elastic scheduling for rollout workers")
+        #     asyncio.run(self.actor_rollout_wg.start_elastic_scheduling())
 
     def _save_checkpoint(self):
         # path: given_path + `/global_step_{global_steps}` + `/actor`
@@ -964,8 +990,9 @@ class RayPPOTrainer:
                             self.async_rollout_manager.wake_up()
                             gen_batch_output = self.async_rollout_manager.generate_sequences(gen_batch)
                             self.async_rollout_manager.sleep()
-                        timing_raw.update(gen_batch_output.meta_info["timing"])
-                        gen_batch_output.meta_info.pop("timing", None)
+                        if "timing" in gen_batch_output.meta_info:
+                            timing_raw.update(gen_batch_output.meta_info["timing"])
+                            gen_batch_output.meta_info.pop("timing", None)
 
                     if self.config.algorithm.adv_estimator == AdvantageEstimator.REMAX:
                         with marked_timer("gen_max", timing_raw, color="purple"):

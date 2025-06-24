@@ -20,6 +20,7 @@ from abc import ABC, abstractmethod
 from contextlib import asynccontextmanager
 from typing import Any, Dict, List, Tuple, Type
 
+import aiohttp
 import fastapi
 import ray
 import uvicorn
@@ -62,6 +63,7 @@ class AsyncServerBase(ABC):
 
         app = fastapi.FastAPI(lifespan=lifespan)
         app.router.add_api_route("/v1/chat/completions", self.chat_completion, methods=["POST"])
+        app.router.add_api_route("/metrics", self.get_metrics, methods=["GET"])
 
         self.port = _get_free_port()
         config = uvicorn.Config(app, host=["::", "0.0.0.0"], port=self.port, log_level="warning")
@@ -94,6 +96,11 @@ class AsyncServerBase(ABC):
     @abstractmethod
     async def sleep(self):
         """Sleep engine to offload model weights and discard kv cache."""
+        raise NotImplementedError
+
+    @abstractmethod
+    async def get_metrics(self):
+        """Get server metrics including number of running requests."""
         raise NotImplementedError
 
 
@@ -161,6 +168,12 @@ class AsyncLLMServerManager:
         self.chat_scheduler_thread = threading.Thread(target=self._init_chat_scheduler, daemon=True)
         self.chat_scheduler_thread.start()
         self.chat_scheduler_ready.wait()
+        
+        print(f"worker_group: {self.worker_group}") # <verl.single_controller.ray.base.RayWorkerGroup object at 0x152560e39850>
+        print(f"register_center: {register_center}") # Actor(WorkerGroupRegisterCenter, cab177916ede06d6fde8476f01000000)
+        print(f"workers_info: {workers_info}") #{0: '93270264da6dfe71e571d779614d22c69d074d3436fa0d0bb725faee', 3: '93270264da6dfe71e571d779614d22c69d074d3436fa0d0bb725faee', 5: '93270264da6dfe71e571d779614d22c69d074d3436fa0d0bb725faee', 4: '93270264da6dfe71e571d779614d22c69d074d3436fa0d0bb725faee', 1: '93270264da6dfe71e571d779614d22c69d074d3436fa0d0bb725faee', 7: '93270264da6dfe71e571d779614d22c69d074d3436fa0d0bb725faee', 2: '93270264da6dfe71e571d779614d22c69d074d3436fa0d0bb725faee', 6: '93270264da6dfe71e571d779614d22c69d074d3436fa0d0bb725faee'}
+        print(f"server_addresses: {self.server_addresses}") # ['10.1.200.5:57957', '10.1.200.5:38321', '10.1.200.5:48591', '10.1.200.5:57225']
+        print(f"async_llm_servers: {self.async_llm_servers}") #[Actor(AsyncSglangServer, a851267c37553807be135d1d01000000), Actor(AsyncSglangServer, 002f250afe4bccc492492f0601000000), Actor(AsyncSglangServer, 268d0368a022e6cdad1e87ec01000000), Actor(AsyncSglangServer, fdb0aa69952f5f0c64aac31601000000)]
 
     def _init_chat_scheduler(self):
         self.chat_scheduler_loop = asyncio.new_event_loop()
@@ -214,6 +227,77 @@ class AsyncLLMServerManager:
         future = asyncio.run_coroutine_threadsafe(self.chat_scheduler.generate_sequences(prompts, **sampling_params), self.chat_scheduler_loop)
         return future.result()
 
+    def get_running_requests_count(self, server_url: str = None) -> float:
+        """Synchronously get the number of running requests from a specific server or all servers.
+        
+        Args:
+            server_url: Optional. If provided, get requests from specific server. 
+                       If None, get total requests from all servers.
+                       
+        Returns:
+            float: Number of running requests.
+        """
+        if server_url is not None:
+            future = asyncio.run_coroutine_threadsafe(
+                self.get_num_running_requests(server_url), 
+                self.chat_scheduler_loop
+            )
+            return future.result()
+        else:
+            future = asyncio.run_coroutine_threadsafe(
+                self.get_total_running_requests(), 
+                self.chat_scheduler_loop
+            )
+            return future.result()
+
+    def get_all_server_requests_count(self) -> Dict[str, float]:
+        """Get the number of running requests from each server.
+        
+        Returns:
+            Dict[str, float]: Mapping of server address to number of running requests.
+        """
+        async def _get_all_counts():
+            results = {}
+            for server_address in self.server_addresses:
+                try:
+                    count = await self.get_num_running_requests(server_address)
+                    results[server_address] = count
+                except Exception as e:
+                    logger.warning(f"Failed to get metrics from {server_address}: {e}")
+                    results[server_address] = 0.0
+            return results
+        
+        future = asyncio.run_coroutine_threadsafe(_get_all_counts(), self.chat_scheduler_loop)
+        return future.result()
+
+    async def get_num_running_requests(self, server_url: str):
+        """Get the number of running requests from a specific server."""
+        async with aiohttp.ClientSession(
+            timeout=aiohttp.ClientTimeout(
+                total=60,
+            ),
+        ) as session:
+            async with session.get(f"http://{server_url}/metrics") as response:
+                response.raise_for_status()
+                text = await response.text()
+                for line in text.split("\n"):
+                    if line.startswith("sglang:num_running_reqs"):
+                        return float(line.split(" ")[1])
+        raise RuntimeError(
+            f"Failed to get num running requests metrics from {server_url}"
+        )
+
+    async def get_total_running_requests(self):
+        """Get the total number of running requests across all servers."""
+        total_requests = 0
+        for server_address in self.server_addresses:
+            try:
+                num_requests = await self.get_num_running_requests(server_address)
+                total_requests += num_requests
+            except Exception as e:
+                logger.warning(f"Failed to get metrics from {server_address}: {e}")
+        return total_requests
+
 
 def async_server_class(rollout_backend: str) -> Type[AsyncServerBase]:
     """Get async server class.
@@ -225,11 +309,13 @@ def async_server_class(rollout_backend: str) -> Type[AsyncServerBase]:
         Type[AsyncServerBase]: async server class.
     """
     if rollout_backend == "vllm":
-        from verl.workers.rollout.vllm_rollout.vllm_async_server import AsyncvLLMServer
+        from verl.workers.rollout.vllm_rollout.vllm_async_server import \
+            AsyncvLLMServer
 
         return AsyncvLLMServer
     elif rollout_backend == "sglang":
-        from verl.workers.rollout.sglang_rollout.async_sglang_server import AsyncSglangServer
+        from verl.workers.rollout.sglang_rollout.async_sglang_server import \
+            AsyncSglangServer
 
         return AsyncSglangServer
     else:
