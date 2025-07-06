@@ -18,7 +18,7 @@ import socket
 import threading
 from abc import ABC, abstractmethod
 from contextlib import asynccontextmanager
-from typing import Any, Dict, List, Tuple, Type
+from typing import Any, Dict, List, Optional, Tuple, Type
 
 import aiohttp
 import fastapi
@@ -84,6 +84,20 @@ class AsyncServerBase(ABC):
         raise NotImplementedError
 
     @abstractmethod
+    async def generate(self, prompt_ids: List[int], sampling_params: Dict[str, Any], request_id: str) -> List[int]:
+        """Generate response ids given prompt ids.
+
+        Args:
+            prompt_ids (List[int]): prompt ids
+            sampling_params (Dict[str, Any]): sampling params
+            request_id (str): request id
+
+        Returns:
+            List[int]: response ids
+        """
+        raise NotImplementedError
+
+    @abstractmethod
     async def init_engine(self):
         """Init async LLM engine."""
         raise NotImplementedError
@@ -128,9 +142,14 @@ class AsyncLLMServerManager:
         self.async_llm_servers = [None] * self.rollout_dp_size
         self.server_addresses = [None] * self.rollout_dp_size
 
-        server_class = async_server_class(
-            rollout_backend=self.config.rollout.name,
-        )
+        if self.config.rollout.agent.custom_async_server:
+            server_class = async_server_class(
+                rollout_backend=self.config.rollout.name,
+                rollout_backend_module=self.config.rollout.agent.custom_async_server.path,
+                rollout_backend_class=self.config.rollout.agent.custom_async_server.name,
+            )
+        else:
+            server_class = async_server_class(rollout_backend=self.config.rollout.name)
 
         # Start all server instances, restart if address already in use.
         unready_dp_ranks = set(range(self.rollout_dp_size))
@@ -193,11 +212,13 @@ class AsyncLLMServerManager:
 
     def wake_up(self):
         """Wake up all vllm instances."""
-        ray.get([server.wake_up.remote() for server in self.async_llm_servers])
+        if self.config.rollout.free_cache_engine:
+            ray.get([server.wake_up.remote() for server in self.async_llm_servers])
 
     def sleep(self):
         """Sleep all vllm instances."""
-        ray.get([server.sleep.remote() for server in self.async_llm_servers])
+        if self.config.rollout.free_cache_engine:
+            ray.get([server.sleep.remote() for server in self.async_llm_servers])
 
     def submit_chat_completions(
         self,
@@ -224,99 +245,46 @@ class AsyncLLMServerManager:
         """Generate multiple sequences in parallel via chat scheduler."""
         assert self.chat_scheduler is not None, "chat scheduler is not initialized."
 
-        future = asyncio.run_coroutine_threadsafe(self.chat_scheduler.generate_sequences(prompts, **sampling_params), self.chat_scheduler_loop)
-        return future.result()
-
-    def get_running_requests_count(self, server_url: str = None) -> float:
-        """Synchronously get the number of running requests from a specific server or all servers.
-        
-        Args:
-            server_url: Optional. If provided, get requests from specific server. 
-                       If None, get total requests from all servers.
-                       
-        Returns:
-            float: Number of running requests.
-        """
-        if server_url is not None:
-            future = asyncio.run_coroutine_threadsafe(
-                self.get_num_running_requests(server_url), 
-                self.chat_scheduler_loop
-            )
-            return future.result()
-        else:
-            future = asyncio.run_coroutine_threadsafe(
-                self.get_total_running_requests(), 
-                self.chat_scheduler_loop
-            )
-            return future.result()
-
-    def get_all_server_requests_count(self) -> Dict[str, float]:
-        """Get the number of running requests from each server.
-        
-        Returns:
-            Dict[str, float]: Mapping of server address to number of running requests.
-        """
-        async def _get_all_counts():
-            results = {}
-            for server_address in self.server_addresses:
-                try:
-                    count = await self.get_num_running_requests(server_address)
-                    results[server_address] = count
-                except Exception as e:
-                    logger.warning(f"Failed to get metrics from {server_address}: {e}")
-                    results[server_address] = 0.0
-            return results
-        
-        future = asyncio.run_coroutine_threadsafe(_get_all_counts(), self.chat_scheduler_loop)
-        return future.result()
-
-    async def get_num_running_requests(self, server_url: str):
-        """Get the number of running requests from a specific server."""
-        async with aiohttp.ClientSession(
-            timeout=aiohttp.ClientTimeout(
-                total=60,
-            ),
-        ) as session:
-            async with session.get(f"http://{server_url}/metrics") as response:
-                response.raise_for_status()
-                text = await response.text()
-                for line in text.split("\n"):
-                    if line.startswith("sglang:num_running_reqs"):
-                        return float(line.split(" ")[1])
-        raise RuntimeError(
-            f"Failed to get num running requests metrics from {server_url}"
+        future = asyncio.run_coroutine_threadsafe(
+            self.chat_scheduler.generate_sequences(prompts, **sampling_params), self.chat_scheduler_loop
         )
-
-    async def get_total_running_requests(self):
-        """Get the total number of running requests across all servers."""
-        total_requests = 0
-        for server_address in self.server_addresses:
-            try:
-                num_requests = await self.get_num_running_requests(server_address)
-                total_requests += num_requests
-            except Exception as e:
-                logger.warning(f"Failed to get metrics from {server_address}: {e}")
-        return total_requests
+        return future.result()
 
 
-def async_server_class(rollout_backend: str) -> Type[AsyncServerBase]:
+def async_server_class(
+    rollout_backend: str, rollout_backend_module: Optional[str] = None, rollout_backend_class: Optional[str] = None
+) -> Type[AsyncServerBase]:
     """Get async server class.
 
     Args:
-        rollout_backend: str, rollout backend, should be "vllm" or "sglang".
+        rollout_backend: str, rollout backend type (alias), should be "vllm" or "sglang".
+        rollout_backend_module: Optional[str], import path of the rollout backend.
+        rollout_backend_class: Optional[str], class name of the rollout backend.
 
     Returns:
         Type[AsyncServerBase]: async server class.
     """
-    if rollout_backend == "vllm":
-        from verl.workers.rollout.vllm_rollout.vllm_async_server import \
-            AsyncvLLMServer
+    if rollout_backend_class is None and rollout_backend_module is None:
+        # If both are None, use the default backend class
+        # Do not change the original import behavior
+        # importlib.import_module and from ... import ... have subtle differences in ray
 
-        return AsyncvLLMServer
-    elif rollout_backend == "sglang":
-        from verl.workers.rollout.sglang_rollout.async_sglang_server import \
-            AsyncSglangServer
+        if rollout_backend == "vllm":
+            from verl.workers.rollout.vllm_rollout.vllm_async_server import \
+                AsyncvLLMServer
 
-        return AsyncSglangServer
-    else:
-        raise NotImplementedError
+            return AsyncvLLMServer
+        elif rollout_backend == "sglang":
+            from verl.workers.rollout.sglang_rollout.async_sglang_server import \
+                AsyncSglangServer
+
+            return AsyncSglangServer
+        else:
+            raise NotImplementedError(f"rollout backend {rollout_backend} is not supported")
+
+    if rollout_backend_module is None or rollout_backend_class is None:
+        raise ValueError("rollout_backend_module and rollout_backend_class must be both provided for customization")
+
+    from verl.utils.import_utils import load_extern_type
+
+    return load_extern_type(rollout_backend_module, rollout_backend_class)
