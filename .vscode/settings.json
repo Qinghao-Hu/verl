@@ -5,11 +5,6 @@
             "source.organizeImports": "always",
         }
     },
-    "python.linting.enabled": true,
-    "python.linting.ruffEnabled": true,
-    "python.linting.pylintEnabled": false,
-    "python.linting.flake8Enabled": false,
-    "python.linting.mypyEnabled": false,
     "files.associations": {
         "array": "cpp",
         "string_view": "cpp",
