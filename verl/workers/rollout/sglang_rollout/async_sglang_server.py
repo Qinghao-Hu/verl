@@ -19,7 +19,7 @@ from typing import Any, Dict, List
 import ray
 from omegaconf import DictConfig
 from starlette.requests import Request
-from starlette.responses import JSONResponse, Response
+from starlette.responses import JSONResponse
 
 from verl.workers.rollout.async_server import AsyncServerBase
 
@@ -37,13 +37,6 @@ class AsyncSglangServer(AsyncServerBase):
         self.wg_prefix = wg_prefix
         self.workers = []
         self.master_worker = None
-
-        print(f"IN __init__ {config=}")
-        print(f"{self.wg_prefix=}")  # self.wg_prefix='bb67tI'
-        print(f"{self._dp_size=}")  # self._dp_size=4
-        print(f"{self._dp_rank=}")  # self._dp_rank=0      /    self._dp_rank=1
-        print(f"{self._tp_size=}")  # self._tp_size=2
-        print(f"{self.workers=}")  # self.workers=[]
 
     async def init_engine(self):
         if self.workers:
@@ -64,8 +57,6 @@ class AsyncSglangServer(AsyncServerBase):
                 self.workers.append(worker)
                 if (self._dp_size * pg_index + local_rank) / self._tp_size == self._dp_rank:
                     self.master_worker = worker
-
-        print(f"IN init_engine {self.workers=}")
 
     async def chat_completion(self, raw_request: Request):
         request = await raw_request.json()

@@ -30,50 +30,53 @@ import sglang.srt.entrypoints.engine
 import torch
 import torch.distributed as dist
 from omegaconf import DictConfig
-from sglang.srt.entrypoints.openai.protocol import Tool
 from sglang.srt.managers.tokenizer_manager import (
-    ReleaseMemoryOccupationReqInput, ResumeMemoryOccupationReqInput,
-    UpdateWeightsFromTensorReqInput)
+    ReleaseMemoryOccupationReqInput,
+    ResumeMemoryOccupationReqInput,
+    UpdateWeightsFromTensorReqInput,
+)
+from sglang.srt.openai_api.protocol import Tool
 from sglang.srt.sampling.sampling_params import SamplingParams
 from sglang.srt.server_args import ServerArgs
-from sglang.srt.utils import (MultiprocessingSerializer, assert_pkg_version,
-                              get_ip, get_open_port, is_cuda,
-                              maybe_set_triton_cache_manager,
-                              set_prometheus_multiproc_dir, set_ulimit)
+from sglang.srt.utils import (
+    MultiprocessingSerializer,
+    assert_pkg_version,
+    get_ip,
+    get_open_port,
+    is_cuda,
+    maybe_set_triton_cache_manager,
+    set_prometheus_multiproc_dir,
+    set_ulimit,
+)
 from tensordict import TensorDict
 from torch.distributed.device_mesh import DeviceMesh, init_device_mesh
 from torch.nn.utils.rnn import pad_sequence
-from transformers import (PreTrainedTokenizer, PreTrainedTokenizerFast,
-                          ProcessorMixin)
+from transformers import PreTrainedTokenizer, PreTrainedTokenizerFast, ProcessorMixin
 
 from verl import DataProto
 from verl.interactions.base import BaseInteraction
-from verl.interactions.utils.interaction_registry import \
-    initialize_interactions_from_config
+from verl.interactions.utils.interaction_registry import initialize_interactions_from_config
 from verl.third_party.sglang import parallel_state as sglang_ps
 from verl.tools.base_tool import BaseTool
-from verl.tools.schemas import (OpenAIFunctionCallSchema,
-                                OpenAIFunctionParsedSchema,
-                                OpenAIFunctionToolCall)
+from verl.tools.schemas import OpenAIFunctionCallSchema, OpenAIFunctionParsedSchema, OpenAIFunctionToolCall
 from verl.tools.utils.tool_registry import initialize_tools_from_config
 from verl.utils.net_utils import is_ipv6
 from verl.utils.profiler import GPUMemoryLogger
-from verl.utils.torch_functional import (get_response_mask,
-                                         pad_sequence_to_length)
+from verl.utils.torch_functional import get_response_mask, pad_sequence_to_length
 from verl.workers.rollout.base import BaseRollout
-from verl.workers.rollout.schemas import (AsyncRolloutRequest,
-                                          AsyncRolloutRequestStateEnum,
-                                          FinishReasonTypeEnum, Message)
+from verl.workers.rollout.schemas import (
+    AsyncRolloutRequest,
+    AsyncRolloutRequestStateEnum,
+    FinishReasonTypeEnum,
+    Message,
+)
 from verl.workers.rollout.sglang_rollout.utils import broadcast_pyobj
 
 try:
-    from sglang.srt.function_call.function_call_parser import \
-        FunctionCallParser
+    from sglang.srt.function_call.function_call_parser import FunctionCallParser
 except ImportError:
     from sglang.srt.function_call_parser import FunctionCallParser
 
-from verl.workers.rollout.elastic_scheduler import (ElasticConfig,
-                                                    ElasticScheduler)
 
 logger = logging.getLogger(__file__)
 logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
@@ -249,7 +252,6 @@ class SGLangRollout(BaseRollout):
         port=None,
         trust_remote_code: bool = False,
         device_mesh: DeviceMesh | None = None,
-        elastic_config: Optional['ElasticConfig'] = None,
         **kwargs,
     ):
         """Synchronized SGLang rollout engine.
@@ -401,22 +403,6 @@ class SGLangRollout(BaseRollout):
         if first_rank_in_node:
             rank = dist.get_rank()
             os.environ["SGLANG_BLOCK_NONZERO_RANK_CHILDREN"] = "0"
-            # Print all instance attributes
-            print("=== SGLangRollout Instance Attributes ===")
-            print(f"self._device_mesh_cpu: {self._device_mesh_cpu}") # DeviceMesh('cpu', [[[0], [1]], [[2], [3]], [[4], [5]]], mesh_dim_names=('dp', 'tp', 'pp'))
-            print(f"self._rank: {self._rank}") # 0 / 2 / 4
-            print(f"self._tp_rank: {self._tp_rank}") # 0
-            print(f"self._tp_size: {self._tp_size}") # 2
-            print(f"self.visible_devices_set: {self.visible_devices_set}") # {'0', '1'} / {'3', '2'} / {'5', '4'}
-            print(f"rank: {rank}") # 0 / 2 / 4
-            print(f"node_rank: {node_rank}") # 0 
-            print(f"first_rank_in_node: {first_rank_in_node}") # True 
-            print(f"tp_size_per_node: {tp_size_per_node}") # 2
-            print(f"nnodes: {nnodes}") # 1
-            print(f"dist_init_addr: {dist_init_addr}") # None
-            print(f"trust_remote_code: {trust_remote_code}") # False
-            print(f"load_format: {load_format}") # dummy
-            print("=====================================")
             self._engine = AsyncEngine(
                 model_path=actor_module,
                 dtype=self.config.dtype,
@@ -430,7 +416,6 @@ class SGLangRollout(BaseRollout):
                 dist_init_addr=dist_init_addr,
                 nnodes=nnodes,
                 trust_remote_code=trust_remote_code,
-                disable_cuda_graph=True, # TODO: remove this
                 # NOTE(linjunrong): add rank to prevent SGLang generate same port inside PortArgs.init_new
                 # when random.seed is being set during training
                 port=30000 + rank,
@@ -582,9 +567,6 @@ class SGLangRollout(BaseRollout):
             concatenated sequences.
         8.  If `self.config.free_cache_engine` is true, the SGLang engine's
             KV cache is flushed after generation on the master TP rank.
-        9.  **NEW**: If `self.config.get("enable_early_memory_release", False)` 
-            is true, this worker will release memory immediately after finishing
-            its own generation, without waiting for other workers.
         Args:
             prompts: A `DataProto` object containing the batch of
               input prompts, including tensor data (like `input_ids`,
@@ -1383,171 +1365,3 @@ class SGLangRollout(BaseRollout):
             return
         await self.sharding_manager.sleep()
         self.is_sleep = True
-
-    # ===========================================
-    # Elastic Scheduler Support Methods
-    # ===========================================
-
-    async def start_elastic_scheduling(self):
-        """Start elastic scheduling if enabled"""
-        if self.elastic_scheduler:
-            await self.elastic_scheduler.start()
-            logger.info("Started elastic scheduling for SGLangRollout")
-
-    async def stop_elastic_scheduling(self):
-        """Stop elastic scheduling"""
-        if self.elastic_scheduler:
-            await self.elastic_scheduler.stop()
-            logger.info("Stopped elastic scheduling for SGLangRollout")
-
-    async def get_worker_status(self) -> dict[int, dict[str, any]]:
-        """Get status of all workers for elastic scheduler"""
-        statuses = {}
-        
-        # Get local worker status
-        if self._tp_rank == 0:  # Only master rank reports
-            statuses[self._tp_rank] = {
-                'active_requests': self._active_request_count,
-                'total_processed': self._total_processed_requests,
-                'status': 'active' if not self.is_sleep else 'inactive',
-                'tp_rank': self._tp_rank,
-                'tp_size': self._tp_size
-            }
-        
-        # Broadcast and collect from all workers
-        all_statuses = {}
-        if hasattr(self, '_device_mesh_cpu'):
-            [all_statuses] = broadcast_pyobj(
-                data=[statuses],
-                rank=self._rank,
-                dist_group=self._device_mesh_cpu["tp"].get_group(),
-                src=self._device_mesh_cpu["tp"].mesh[0].item(),
-                force_cpu_device=False,
-            )
-        else:
-            all_statuses = statuses
-            
-        return all_statuses
-
-    def _get_active_request_count(self) -> int:
-        """Get number of active requests on this worker"""
-        return self._active_request_count
-
-    def _increment_request_count(self):
-        """Increment active request count"""
-        self._active_request_count += 1
-
-    def _decrement_request_count(self):
-        """Decrement active request count"""
-        self._active_request_count = max(0, self._active_request_count - 1)
-        self._total_processed_requests += 1
-
-    async def flush_worker_cache(self, worker_id: int):
-        """Flush cache for a specific worker"""
-        if worker_id == self._tp_rank and self._engine is not None:
-            try:
-                # Use the existing AsyncEngine flush_cache method
-                loop = asyncio.get_event_loop()
-                await self._engine.flush_cache()
-                logger.info(f"Flushed cache for worker {worker_id}")
-            except Exception as e:
-                logger.error(f"Failed to flush cache for worker {worker_id}: {e}")
-                raise
-
-    async def resume_worker_memory(self, worker_id: int):
-        """Resume worker memory occupation"""
-        if worker_id == self._tp_rank and self._engine is not None:
-            try:
-                # Use the existing AsyncEngine resume_memory_occupation method
-                await self._engine.resume_memory_occupation()
-                logger.info(f"Resumed memory occupation for worker {worker_id}")
-            except Exception as e:
-                logger.error(f"Failed to resume memory for worker {worker_id}: {e}")
-                raise
-
-    async def wake_up_all_workers(self):
-        """Wake up all workers (for validation/testing)"""
-        if self.elastic_scheduler:
-            # Temporarily activate all workers
-            for worker_id in self.elastic_scheduler.workers:
-                if self.elastic_scheduler.workers[worker_id].status != self.elastic_scheduler.workers[worker_id].status.ACTIVE:
-                    await self.elastic_scheduler._resume_worker(worker_id)
-                    self.elastic_scheduler.workers[worker_id].status = self.elastic_scheduler.workers[worker_id].status.ACTIVE
-                    self.elastic_scheduler.active_workers.add(worker_id)
-
-    async def resume_elastic_scheduling(self):
-        """Resume normal elastic scheduling after manual intervention"""
-        if self.elastic_scheduler:
-            # Let the scheduler resume normal operation
-            logger.info("Resumed elastic scheduling after manual intervention")
-
-    @property
-    def world_size(self) -> int:
-        """Get the total number of workers (for elastic scheduler)"""
-        if hasattr(self, '_device_mesh_cpu'):
-            return self._device_mesh_cpu.size() // self._tp_size
-        return 1
-
-    def get_elastic_metrics(self) -> dict[str, any]:
-        """Get elastic scheduling metrics"""
-        if self.elastic_scheduler:
-            return self.elastic_scheduler.get_metrics()
-        return {}
-
-    # ===========================================
-    # Early Memory Release Support Methods
-    # ===========================================
-
-    async def release_memory_early(self):
-        """Release memory occupation early for this worker after completing generation"""
-        if self._engine is not None and self._tp_rank == 0:
-            try:
-                logger.info(f"Worker {self._rank} releasing memory early...")
-                await self._engine.flush_cache()
-                await self._engine.release_memory_occupation()
-                logger.info(f"Worker {self._rank} memory released successfully")
-                return True
-            except Exception as e:
-                logger.error(f"Failed to release memory early for worker {self._rank}: {e}")
-                return False
-        return False
-
-    async def reacquire_memory(self):
-        """Reacquire memory occupation for this worker before next generation"""
-        if self._engine is not None and self._tp_rank == 0:
-            try:
-                logger.info(f"Worker {self._rank} reacquiring memory...")
-                await self._engine.resume_memory_occupation()
-                logger.info(f"Worker {self._rank} memory reacquired successfully")
-                return True
-            except Exception as e:
-                logger.error(f"Failed to reacquire memory for worker {self._rank}: {e}")
-                return False
-        return False
-
-    def set_early_memory_release(self, enable: bool):
-        """Enable or disable early memory release for this worker"""
-        self.config.enable_early_memory_release = enable
-        logger.info(f"Worker {self._rank} early memory release {'enabled' if enable else 'disabled'}")
-
-    def get_memory_status(self) -> dict:
-        """Get current memory status of this worker"""
-        status = {
-            'worker_rank': self._rank,
-            'tp_rank': self._tp_rank,
-            'tp_size': self._tp_size,
-            'early_memory_release_enabled': self.config.get("enable_early_memory_release", False),
-            'free_cache_engine_enabled': self.config.get("free_cache_engine", False),
-            'is_sleep': self.is_sleep,
-        }
-        
-        # Add GPU memory info if available
-        if is_cuda():
-            import torch.cuda
-
-            # Convert bytes to GB
-            status['gpu_memory_allocated'] = torch.cuda.memory_allocated() / (1024**3)  
-            status['gpu_memory_reserved'] = torch.cuda.memory_reserved() / (1024**3)  
-            status['gpu_memory_max_allocated'] = torch.cuda.max_memory_allocated() / (1024**3)  
-        
-        return status

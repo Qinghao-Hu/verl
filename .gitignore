@@ -1,5 +1,5 @@
 slurm/*
-
+playground/bak/*
 **/*.pt
 **/checkpoints
 **/wget-log

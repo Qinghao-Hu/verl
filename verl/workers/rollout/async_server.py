@@ -20,7 +20,6 @@ from abc import ABC, abstractmethod
 from contextlib import asynccontextmanager
 from typing import Any, Dict, List, Optional, Tuple, Type
 
-import aiohttp
 import fastapi
 import ray
 import uvicorn
@@ -63,7 +62,6 @@ class AsyncServerBase(ABC):
 
         app = fastapi.FastAPI(lifespan=lifespan)
         app.router.add_api_route("/v1/chat/completions", self.chat_completion, methods=["POST"])
-        app.router.add_api_route("/metrics", self.get_metrics, methods=["GET"])
 
         self.port = _get_free_port()
         config = uvicorn.Config(app, host=["::", "0.0.0.0"], port=self.port, log_level="warning")
@@ -110,11 +108,6 @@ class AsyncServerBase(ABC):
     @abstractmethod
     async def sleep(self):
         """Sleep engine to offload model weights and discard kv cache."""
-        raise NotImplementedError
-
-    @abstractmethod
-    async def get_metrics(self):
-        """Get server metrics including number of running requests."""
         raise NotImplementedError
 
 
@@ -187,12 +180,6 @@ class AsyncLLMServerManager:
         self.chat_scheduler_thread = threading.Thread(target=self._init_chat_scheduler, daemon=True)
         self.chat_scheduler_thread.start()
         self.chat_scheduler_ready.wait()
-        
-        print(f"worker_group: {self.worker_group}") # <verl.single_controller.ray.base.RayWorkerGroup object at 0x152560e39850>
-        print(f"register_center: {register_center}") # Actor(WorkerGroupRegisterCenter, cab177916ede06d6fde8476f01000000)
-        print(f"workers_info: {workers_info}") #{0: '93270264da6dfe71e571d779614d22c69d074d3436fa0d0bb725faee', 3: '93270264da6dfe71e571d779614d22c69d074d3436fa0d0bb725faee', 5: '93270264da6dfe71e571d779614d22c69d074d3436fa0d0bb725faee', 4: '93270264da6dfe71e571d779614d22c69d074d3436fa0d0bb725faee', 1: '93270264da6dfe71e571d779614d22c69d074d3436fa0d0bb725faee', 7: '93270264da6dfe71e571d779614d22c69d074d3436fa0d0bb725faee', 2: '93270264da6dfe71e571d779614d22c69d074d3436fa0d0bb725faee', 6: '93270264da6dfe71e571d779614d22c69d074d3436fa0d0bb725faee'}
-        print(f"server_addresses: {self.server_addresses}") # ['10.1.200.5:57957', '10.1.200.5:38321', '10.1.200.5:48591', '10.1.200.5:57225']
-        print(f"async_llm_servers: {self.async_llm_servers}") #[Actor(AsyncSglangServer, a851267c37553807be135d1d01000000), Actor(AsyncSglangServer, 002f250afe4bccc492492f0601000000), Actor(AsyncSglangServer, 268d0368a022e6cdad1e87ec01000000), Actor(AsyncSglangServer, fdb0aa69952f5f0c64aac31601000000)]
 
     def _init_chat_scheduler(self):
         self.chat_scheduler_loop = asyncio.new_event_loop()
@@ -270,13 +257,11 @@ def async_server_class(
         # importlib.import_module and from ... import ... have subtle differences in ray
 
         if rollout_backend == "vllm":
-            from verl.workers.rollout.vllm_rollout.vllm_async_server import \
-                AsyncvLLMServer
+            from verl.workers.rollout.vllm_rollout.vllm_async_server import AsyncvLLMServer
 
             return AsyncvLLMServer
         elif rollout_backend == "sglang":
-            from verl.workers.rollout.sglang_rollout.async_sglang_server import \
-                AsyncSglangServer
+            from verl.workers.rollout.sglang_rollout.async_sglang_server import AsyncSglangServer
 
             return AsyncSglangServer
         else:

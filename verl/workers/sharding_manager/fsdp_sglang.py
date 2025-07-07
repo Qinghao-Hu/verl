@@ -17,7 +17,6 @@
 import asyncio
 import logging
 import os
-import threading
 
 import torch
 import torch.distributed as dist
@@ -25,20 +24,16 @@ from sglang.srt.entrypoints.engine import Engine
 from sglang.srt.model_executor.model_runner import LocalSerializedTensor
 from sglang.srt.utils import MultiprocessingSerializer
 from torch.distributed.device_mesh import DeviceMesh
-from torch.distributed.fsdp.api import (FullStateDictConfig,
-                                        ShardedStateDictConfig, StateDictType)
-from torch.distributed.fsdp.fully_sharded_data_parallel import \
-    FullyShardedDataParallel as FSDP
+from torch.distributed.fsdp.api import FullStateDictConfig, ShardedStateDictConfig, StateDictType
+from torch.distributed.fsdp.fully_sharded_data_parallel import FullyShardedDataParallel as FSDP
 from torch.distributed.tensor import DTensor
 
 from verl import DataProto
 from verl.protocol import all_gather_data_proto
 from verl.utils.device import get_device_id, get_torch_device
-from verl.utils.fsdp_utils import (fsdp_version, load_fsdp_model_to_gpu,
-                                   offload_fsdp_model_to_cpu)
+from verl.utils.fsdp_utils import fsdp_version, load_fsdp_model_to_gpu, offload_fsdp_model_to_cpu
 from verl.utils.model import convert_weight_keys
-from verl.utils.profiler import (GPUMemoryLogger, log_gpu_memory_usage,
-                                 simple_timer)
+from verl.utils.profiler import GPUMemoryLogger, log_gpu_memory_usage, simple_timer
 from verl.utils.torch_functional import check_device_is_available
 
 from .base import BaseShardingManager
@@ -52,37 +47,6 @@ def _preprocess_tensor_for_update_weights(tensor: torch.Tensor):
     if isinstance(tensor, DTensor):
         return tensor.full_tensor()
     return tensor
-
-
-def _run_async_in_sync_context(coro):
-    """
-    Run an async coroutine in a sync context, handling the case where
-    an event loop is already running.
-    """
-    try:
-        # Check if there's already a running event loop
-        loop = asyncio.get_running_loop()
-        # If we get here, we're in an async context
-        # We need to run the coroutine in a separate thread
-        import concurrent.futures
-        
-        def run_in_thread():
-            # Create new event loop in thread
-            new_loop = asyncio.new_event_loop()
-            asyncio.set_event_loop(new_loop)
-            try:
-                return new_loop.run_until_complete(coro)
-            finally:
-                new_loop.close()
-        
-        with concurrent.futures.ThreadPoolExecutor() as executor:
-            future = executor.submit(run_in_thread)
-            return future.result()
-            
-    except RuntimeError:
-        # No event loop is running, we can use run_until_complete safely
-        loop = asyncio.get_event_loop()
-        return loop.run_until_complete(coro)
 
 
 class FSDPSGLangShardingManager(BaseShardingManager):
