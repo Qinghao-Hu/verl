@@ -30,10 +30,10 @@ import sglang.srt.entrypoints.engine
 import torch
 import torch.distributed as dist
 from omegaconf import DictConfig
+from sglang.srt.entrypoints.openai.protocol import Tool
 from sglang.srt.managers.tokenizer_manager import (
     ReleaseMemoryOccupationReqInput, ResumeMemoryOccupationReqInput,
     UpdateWeightsFromTensorReqInput)
-from sglang.srt.openai_api.protocol import Tool
 from sglang.srt.sampling.sampling_params import SamplingParams
 from sglang.srt.server_args import ServerArgs
 from sglang.srt.utils import (MultiprocessingSerializer, assert_pkg_version,
@@ -582,6 +582,9 @@ class SGLangRollout(BaseRollout):
             concatenated sequences.
         8.  If `self.config.free_cache_engine` is true, the SGLang engine's
             KV cache is flushed after generation on the master TP rank.
+        9.  **NEW**: If `self.config.get("enable_early_memory_release", False)` 
+            is true, this worker will release memory immediately after finishing
+            its own generation, without waiting for other workers.
         Args:
             prompts: A `DataProto` object containing the batch of
               input prompts, including tensor data (like `input_ids`,
@@ -1490,3 +1493,61 @@ class SGLangRollout(BaseRollout):
         if self.elastic_scheduler:
             return self.elastic_scheduler.get_metrics()
         return {}
+
+    # ===========================================
+    # Early Memory Release Support Methods
+    # ===========================================
+
+    async def release_memory_early(self):
+        """Release memory occupation early for this worker after completing generation"""
+        if self._engine is not None and self._tp_rank == 0:
+            try:
+                logger.info(f"Worker {self._rank} releasing memory early...")
+                await self._engine.flush_cache()
+                await self._engine.release_memory_occupation()
+                logger.info(f"Worker {self._rank} memory released successfully")
+                return True
+            except Exception as e:
+                logger.error(f"Failed to release memory early for worker {self._rank}: {e}")
+                return False
+        return False
+
+    async def reacquire_memory(self):
+        """Reacquire memory occupation for this worker before next generation"""
+        if self._engine is not None and self._tp_rank == 0:
+            try:
+                logger.info(f"Worker {self._rank} reacquiring memory...")
+                await self._engine.resume_memory_occupation()
+                logger.info(f"Worker {self._rank} memory reacquired successfully")
+                return True
+            except Exception as e:
+                logger.error(f"Failed to reacquire memory for worker {self._rank}: {e}")
+                return False
+        return False
+
+    def set_early_memory_release(self, enable: bool):
+        """Enable or disable early memory release for this worker"""
+        self.config.enable_early_memory_release = enable
+        logger.info(f"Worker {self._rank} early memory release {'enabled' if enable else 'disabled'}")
+
+    def get_memory_status(self) -> dict:
+        """Get current memory status of this worker"""
+        status = {
+            'worker_rank': self._rank,
+            'tp_rank': self._tp_rank,
+            'tp_size': self._tp_size,
+            'early_memory_release_enabled': self.config.get("enable_early_memory_release", False),
+            'free_cache_engine_enabled': self.config.get("free_cache_engine", False),
+            'is_sleep': self.is_sleep,
+        }
+        
+        # Add GPU memory info if available
+        if is_cuda():
+            import torch.cuda
+
+            # Convert bytes to GB
+            status['gpu_memory_allocated'] = torch.cuda.memory_allocated() / (1024**3)  
+            status['gpu_memory_reserved'] = torch.cuda.memory_reserved() / (1024**3)  
+            status['gpu_memory_max_allocated'] = torch.cuda.max_memory_allocated() / (1024**3)  
+        
+        return status

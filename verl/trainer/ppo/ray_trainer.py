@@ -41,7 +41,8 @@ from verl.protocol import pad_dataproto_to_divisor, unpad_dataproto
 from verl.single_controller.base import Worker
 from verl.single_controller.ray import (RayClassWithInitArgs, RayResourcePool,
                                         RayWorkerGroup)
-from verl.single_controller.ray.base import create_colocated_worker_cls
+from verl.single_controller.ray.base import (create_colocated_worker_cls,
+                                             merge_resource_pool)
 from verl.trainer.config import AlgoConfig
 from verl.trainer.ppo import core_algos
 from verl.trainer.ppo.core_algos import AdvantageEstimator, agg_loss

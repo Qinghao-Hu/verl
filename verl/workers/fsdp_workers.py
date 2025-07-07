@@ -41,37 +41,28 @@ from verl.single_controller.base.decorator import Dispatch, register
 from verl.utils import hf_processor, hf_tokenizer
 from verl.utils.activation_offload import enable_activation_offloading
 from verl.utils.checkpoint.fsdp_checkpoint_manager import FSDPCheckpointManager
-from verl.utils.device import (
-    get_device_id,
-    get_device_name,
-    get_nccl_backend,
-    get_torch_device,
-    is_cuda_available,
-    is_npu_available,
-)
+from verl.utils.device import (get_device_id, get_device_name,
+                               get_nccl_backend, get_torch_device,
+                               is_cuda_available, is_npu_available)
 from verl.utils.flops_counter import FlopsCounter
 from verl.utils.fs import copy_to_local
-from verl.utils.fsdp_utils import (
-    CPUOffloadPolicy,
-    MixedPrecisionPolicy,
-    apply_fsdp2,
-    fsdp2_load_full_state_dict,
-    fsdp_version,
-    get_fsdp_wrap_policy,
-    get_init_weight_context_manager,
-    init_fn,
-    layered_summon_lora_params,
-    load_fsdp_model_to_gpu,
-    load_fsdp_optimizer,
-    offload_fsdp_model_to_cpu,
-    offload_fsdp_optimizer,
-)
+from verl.utils.fsdp_utils import (CPUOffloadPolicy, MixedPrecisionPolicy,
+                                   apply_fsdp2, fsdp2_load_full_state_dict,
+                                   fsdp_version, get_fsdp_wrap_policy,
+                                   get_init_weight_context_manager, init_fn,
+                                   layered_summon_lora_params,
+                                   load_fsdp_model_to_gpu, load_fsdp_optimizer,
+                                   offload_fsdp_model_to_cpu,
+                                   offload_fsdp_optimizer)
 from verl.utils.import_utils import import_external_libs
 from verl.utils.model import compute_position_id_with_mask
-from verl.utils.profiler import DistProfiler, DistProfilerExtension, ProfilerConfig, log_gpu_memory_usage, simple_timer
+from verl.utils.profiler import (DistProfiler, DistProfilerExtension,
+                                 ProfilerConfig, log_gpu_memory_usage,
+                                 simple_timer)
 from verl.utils.profiler.performance import reduce_timing
 from verl.utils.py_functional import convert_to_regular_types
-from verl.workers.sharding_manager.fsdp_ulysses import FSDPUlyssesShardingManager
+from verl.workers.sharding_manager.fsdp_ulysses import \
+    FSDPUlyssesShardingManager
 
 logger = logging.getLogger(__file__)
 logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
@@ -219,9 +210,11 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
     ):
         from torch import optim
         from torch.distributed.fsdp import CPUOffload, MixedPrecision
-        from transformers import AutoConfig, AutoModelForCausalLM, AutoModelForVision2Seq
+        from transformers import (AutoConfig, AutoModelForCausalLM,
+                                  AutoModelForVision2Seq)
 
-        from verl.utils.model import get_generation_config, print_model_size, update_model_config
+        from verl.utils.model import (get_generation_config, print_model_size,
+                                      update_model_config)
         from verl.utils.torch_dtypes import PrecisionType
 
         assert role in ["actor", "ref"]
@@ -288,7 +281,8 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
 
             # Apply Liger kernel to the model if use_liger is set to True
             if use_liger:
-                from liger_kernel.transformers.monkey_patch import _apply_liger_kernel_to_instance
+                from liger_kernel.transformers.monkey_patch import \
+                    _apply_liger_kernel_to_instance
 
                 _apply_liger_kernel_to_instance(model=actor_module)
 
@@ -410,7 +404,9 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
 
         # TODO: add more optimizer args into config
         if role == "actor" and optim_config is not None:
-            from verl.utils.torch_functional import get_constant_schedule_with_warmup, get_cosine_schedule_with_warmup
+            from verl.utils.torch_functional import (
+                get_constant_schedule_with_warmup,
+                get_cosine_schedule_with_warmup)
 
             actor_optimizer = optim.AdamW(
                 actor_module_fsdp.parameters(),
@@ -476,7 +472,8 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
 
         elif rollout_name == "vllm":
             from verl.workers.rollout.vllm_rollout import vLLMRollout
-            from verl.workers.sharding_manager.fsdp_vllm import FSDPVLLMShardingManager
+            from verl.workers.sharding_manager.fsdp_vllm import \
+                FSDPVLLMShardingManager
 
             log_gpu_memory_usage(f"Before building {rollout_name} rollout", logger=logger)
             local_path = copy_to_local(self.config.model.path, use_shm=self.config.model.get("use_shm", False))
@@ -516,7 +513,6 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
 
         elif rollout_name == "sglang":
             from verl.workers.rollout.sglang_rollout import SGLangRollout
-
             # NOTE(linjunrong): Due to recent fp8 support in SGLang. Now importing any symbol relate to
             # SGLang's model_runner would check CUDA device capability. However, due to verl's setting,
             # the main process of ray can not find any CUDA device, which would potentially lead to:
@@ -524,7 +520,8 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
             # For this reason, sharding_manager.__init__ should not import FSDPSGLangShardingManager and
             # we import it here use the abs path.
             # check: https://github.com/sgl-project/sglang/blob/00f42707eaddfc2c0528e5b1e0094025c640b7a0/python/sglang/srt/layers/quantization/fp8_utils.py#L76
-            from verl.workers.sharding_manager.fsdp_sglang import FSDPSGLangShardingManager
+            from verl.workers.sharding_manager.fsdp_sglang import \
+                FSDPSGLangShardingManager
 
             local_path = copy_to_local(self.config.model.path)
             log_gpu_memory_usage(f"Before building {rollout_name} rollout", logger=logger)
@@ -1151,7 +1148,8 @@ class CriticWorker(Worker, DistProfilerExtension):
         if self.rank == 0:
             print(f"Total steps: {total_steps}, num_warmup_steps: {num_warmup_steps}")
 
-        from verl.utils.torch_functional import get_constant_schedule_with_warmup, get_cosine_schedule_with_warmup
+        from verl.utils.torch_functional import (
+            get_constant_schedule_with_warmup, get_cosine_schedule_with_warmup)
 
         if warmup_style == "constant":
             critic_lr_scheduler = get_constant_schedule_with_warmup(
@@ -1422,7 +1420,8 @@ class RewardModelWorker(Worker, DistProfilerExtension):
 
     def _forward_micro_batch(self, micro_batch):
         if is_cuda_available:
-            from flash_attn.bert_padding import index_first_axis, pad_input, rearrange, unpad_input
+            from flash_attn.bert_padding import (index_first_axis, pad_input,
+                                                 rearrange, unpad_input)
         elif is_npu_available:
             from transformers.integrations.npu_flash_attention import (
                 index_first_axis,
@@ -1431,7 +1430,8 @@ class RewardModelWorker(Worker, DistProfilerExtension):
                 unpad_input,
             )
 
-        from verl.utils.ulysses import gather_outpus_and_unpad, ulysses_pad_and_slice_inputs
+        from verl.utils.ulysses import (gather_outpus_and_unpad,
+                                        ulysses_pad_and_slice_inputs)
 
         with torch.no_grad(), torch.autocast(device_type=device_name, dtype=torch.bfloat16):
             input_ids = micro_batch["input_ids"]
@@ -1577,7 +1577,8 @@ class RewardModelWorker(Worker, DistProfilerExtension):
     def compute_rm_score(self, data: DataProto):
         import itertools
 
-        from verl.utils.seqlen_balancing import get_reverse_idx, rearrange_micro_batches
+        from verl.utils.seqlen_balancing import (get_reverse_idx,
+                                                 rearrange_micro_batches)
 
         # Support all hardwares
         data = data.to(get_device_id())
@@ -1694,25 +1695,33 @@ class AsyncActorRolloutRefWorker(ActorRolloutRefWorker):
 
     @register(dispatch_mode=Dispatch.DIRECT_ROLLOUT_METHOD)
     async def get_num_running_requests(self):
-        """Get the number of running requests from the rollout backend."""
-        try:
-            # For sglang backend, try to get running requests
-            if hasattr(self.rollout, "get_num_running_requests"):
-                return await self.rollout.get_num_running_requests()
-            elif hasattr(self.rollout, "engine") and hasattr(self.rollout.engine, "get_num_running_requests"):
-                return await self.rollout.engine.get_num_running_requests()
-            elif hasattr(self.rollout, "engine") and hasattr(self.rollout.engine, "scheduler"):
-                # For sglang, try to get running request count from scheduler
-                scheduler = self.rollout.engine.scheduler
-                if hasattr(scheduler, "get_num_running_reqs"):
-                    return scheduler.get_num_running_reqs()
-                elif hasattr(scheduler, "waiting") and hasattr(scheduler, "running"):
-                    # Count running and waiting requests
-                    running_count = len(getattr(scheduler, "running", []))
-                    waiting_count = len(getattr(scheduler, "waiting", []))
-                    return running_count + waiting_count
-            # Fallback: return 0 if we can't get the count
-            return 0
-        except Exception as e:
-            print(f"Error getting running requests count: {e}")
-            return 0
+        assert self._is_rollout and self.rollout is not None
+        return await self.rollout.get_num_running_requests()
+
+    # ===========================================
+    # Early Memory Release Support Methods  
+    # ===========================================
+
+    @register(dispatch_mode=Dispatch.DIRECT_ROLLOUT_METHOD)
+    async def release_memory_early(self):
+        """Release memory occupation early for this worker after completing generation"""
+        assert self._is_rollout and self.rollout is not None
+        return await self.rollout.release_memory_early()
+
+    @register(dispatch_mode=Dispatch.DIRECT_ROLLOUT_METHOD) 
+    async def reacquire_memory(self):
+        """Reacquire memory occupation for this worker before next generation"""
+        assert self._is_rollout and self.rollout is not None
+        return await self.rollout.reacquire_memory()
+
+    @register(dispatch_mode=Dispatch.DIRECT_ROLLOUT_METHOD)
+    def set_early_memory_release(self, enable: bool):
+        """Enable or disable early memory release for this worker"""
+        assert self._is_rollout and self.rollout is not None
+        return self.rollout.set_early_memory_release(enable)
+
+    @register(dispatch_mode=Dispatch.DIRECT_ROLLOUT_METHOD)
+    def get_memory_status(self):
+        """Get current memory status of this worker"""
+        assert self._is_rollout and self.rollout is not None
+        return self.rollout.get_memory_status()
