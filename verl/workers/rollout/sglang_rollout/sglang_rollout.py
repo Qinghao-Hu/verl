@@ -672,23 +672,31 @@ class SGLangRollout(BaseRollout):
 
         # Update with any additional kwargs
         request_sampling_params.update(kwargs)
-
         if self._tp_rank == 0:
             loop = asyncio.get_event_loop()
-            output = loop.run_until_complete(
-                self._engine.async_generate(
+            async def _generate_and_sleep():
+                output = await self._engine.async_generate(
                     prompt=None,  # because we have already convert it to prompt token id
                     sampling_params=request_sampling_params,
                     return_logprob=True,
                     input_ids=idx_list,
                     image_data=image_list,
                 )
-            )
+                dp_rank = self._device_mesh_cpu["dp"].get_local_rank()
+
+                # Early memory release: release memory immediately after generation completes
+                if self.sharding_manager is not None:
+                    # Release memory immediately for this worker
+                    worker_id = dp_rank  # Use dp_rank as worker identifier
+                    await self.sharding_manager.release_memory_immediately(worker_id)
+                return output
+
+            output = loop.run_until_complete(_generate_and_sleep())
         else:
             output = None
 
         # Most naive implementation, can extract tensor and send via gloo if too slow
-        dist.barrier()
+        # dist.barrier()
         [output] = broadcast_pyobj(
             data=[output],
             rank=self._rank,
@@ -1000,16 +1008,6 @@ class SGLangRollout(BaseRollout):
 
             interaction = self.interaction_map[interaction_name]
             await interaction.start_interaction(_req.request_id, **interaction_kwargs)
-
-    @GPUMemoryLogger(role="sglang rollout", logger=logger)
-    @torch.no_grad()
-    def generate_sequences_with_tools(self, prompts: DataProto, **kwargs) -> DataProto:
-        logger.warning(
-            "`generate_sequences_with_tools` is deprecated, please use `generate_sequences(...)`",
-            DeprecationWarning,
-            stacklevel=2,
-        )
-        return self._req_level_generate_sequences(prompts, **kwargs)
 
     @GPUMemoryLogger(role="sglang rollout", logger=logger)
     @torch.no_grad()
@@ -1349,8 +1347,8 @@ class SGLangRollout(BaseRollout):
         self.is_sleep = False
 
     # this function is left for uniform train-inference resharding
-    async def sleep(self):
+    async def sleep(self, worker_id: int | None = None):
         if self.is_sleep:
             return
-        await self.sharding_manager.sleep()
+        await self.sharding_manager.sleep(worker_id)
         self.is_sleep = True

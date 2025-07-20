@@ -85,6 +85,8 @@ class FSDPSGLangShardingManager(BaseShardingManager):
         self.tp_size = self.device_mesh["infer_tp"].size()
         self.tp_rank = self.device_mesh["infer_tp"].get_local_rank()
 
+        self.worker_completed = False
+
         # Note that torch_random_states may be different on each dp rank
         self.torch_random_states = get_torch_device().get_rng_state()
         # get a random rng states
@@ -105,8 +107,9 @@ class FSDPSGLangShardingManager(BaseShardingManager):
 
     @GPUMemoryLogger(role="FSDPSGLangShardingManager exit", logger=logger)
     def __exit__(self, exc_type, exc_value, traceback):
-        loop = asyncio.get_event_loop()
-        loop.run_until_complete(self.sleep())
+        pass
+        # loop = asyncio.get_event_loop()
+        # loop.run_until_complete(self.sleep())
 
     async def update_weights(self, params):
         # Most naive implementation, can optimize a lot if it is bottleneck from sglang Engine weight update
@@ -141,6 +144,18 @@ class FSDPSGLangShardingManager(BaseShardingManager):
     async def release_memory(self):
         if self.device_mesh["infer_tp"].get_local_rank() == 0 and self.rollout_config.free_cache_engine:
             await self.inference_engine.release_memory_occupation()
+
+    async def release_memory_immediately(self, worker_id: int):
+        if self.device_mesh["infer_tp"].get_local_rank() == 0 and self.rollout_config.free_cache_engine:
+            # Check if the engine has async release_memory_immediately method
+            if hasattr(self.inference_engine, "release_memory_immediately") and asyncio.iscoroutinefunction(
+                self.inference_engine.release_memory_immediately
+            ):
+                await self.inference_engine.release_memory_immediately(worker_id=worker_id)
+            else:
+                # Fallback to regular memory release if async version not available
+                logger.warning("Async release_memory_immediately not available, using regular release_memory")
+                await self.inference_engine.release_memory_occupation()
 
     @GPUMemoryLogger(role="FSDPSGLangShardingManager enter", logger=logger)
     async def wake_up(self):
@@ -183,10 +198,11 @@ class FSDPSGLangShardingManager(BaseShardingManager):
             get_torch_device().set_rng_state(self.gen_random_states)
 
     @GPUMemoryLogger(role="FSDPSGLangShardingManager exit", logger=logger)
-    async def sleep(self):
+    async def sleep(self, worker_id: int | None = None):
         if self.rollout_config.free_cache_engine:
             log_gpu_memory_usage("Before SGLang offload in sharding manager", logger=logger)
-            await self.release_memory()
+            # await self.release_memory()
+            await self.release_memory_immediately(worker_id=worker_id)
             log_gpu_memory_usage("After SGLang offload in sharding manager", logger=logger)
 
         self.module.train()

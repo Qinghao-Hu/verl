@@ -8,7 +8,7 @@
 
 ```bash
 git clone --recursive https://github.com/mit-han-lab/fastrl.git
-conda create --name fastrl python=3.10
+conda create --name fastrl python=3.12
 conda activate fastrl
 pip install -e .
 ```

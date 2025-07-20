@@ -17,12 +17,9 @@ import ray
 from verl import DataProto
 from verl.single_controller.base import Worker
 from verl.single_controller.base.decorator import Dispatch, register
-from verl.single_controller.ray.base import (
-    RayClassWithInitArgs,
-    RayResourcePool,
-    RayWorkerGroup,
-    create_colocated_worker_cls_fused,
-)
+from verl.single_controller.ray.base import (RayClassWithInitArgs,
+                                             RayResourcePool, RayWorkerGroup,
+                                             create_colocated_worker_cls_fused)
 
 
 @ray.remote
@@ -49,7 +46,7 @@ class Critic(Worker):
 
 
 def test_colocated_workers_fused():
-    ray.init()
+    ray.init(num_gpus=8, num_cpus=96)
 
     import torch
 
@@ -81,3 +78,7 @@ def test_colocated_workers_fused():
     torch.testing.assert_close(expected_critic_output.batch, critic_output.batch, atol=0, rtol=0)
 
     ray.shutdown()
+
+
+if __name__ == "__main__":
+    test_colocated_workers_fused()
