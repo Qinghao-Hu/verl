@@ -1,7 +1,10 @@
+import logging
 import time
 
 import torch
 from sglang.srt.entrypoints.engine import Engine
+
+logging.basicConfig(level=logging.INFO)
 
 spec_algorithm = "EAGLE"  # [None, "EAGLE", "EAGLE3", "LOOKAHEAD"]
 
@@ -25,35 +28,42 @@ def main():
     if spec_algorithm == "EAGLE3":
         speculative_args = {
             "speculative_algorithm": "EAGLE3",
-            "speculative_draft_model_path": "/dataset/model/eagle/sglang-EAGLE3-LLaMA3.1-Instruct-8B",
+            "speculative_draft_model_path": "/nobackup/model/eagle/sglang-EAGLE3-LLaMA3.1-Instruct-8B",
             "speculative_num_steps": 8,
             "speculative_eagle_topk": 8,
             "speculative_num_draft_tokens": 64,
             "speculative_eagle_mab_algorithm": "EG",
-            "speculative_eagle_mab_configs": ["8_8_48","8_4_8"], # "8_8_32", "8_8_16", 
+            "speculative_eagle_mab_configs": ["8_8_48", "8_4_8"],  # "8_8_32", "8_8_16",
             "speculative_mab_window_size": 100,
             "mem_fraction_static": 0.65,
         }
     elif spec_algorithm == "EAGLE":
         speculative_args = {
             "speculative_algorithm": "EAGLE",
-            "speculative_draft_model_path": "/dataset/model/eagle/sglang-EAGLE-LLaMA3-Instruct-8B",
+            "speculative_draft_model_path": "/nobackup/model/eagle-sgl/sglang-EAGLE-LLaMA3-Instruct-8B",
             "speculative_num_steps": 8,
             "speculative_eagle_topk": 8,
             "speculative_num_draft_tokens": 48,
-            "speculative_eagle_mab_algorithm": "PREDEFINED", # "EG", "PREDEFINED", "UCB1"
-            "speculative_eagle_mab_configs": ["8_8_32","8_8_16","8_8_8"], # "8_8_32", "8_8_16", 
+            "speculative_eagle_mab_algorithm": "BEG",  # "EG", "PREDEFINED", "UCB1", "BEG"
+            "speculative_eagle_mab_configs": [
+                "8_8_32",
+                "8_8_16",
+                "8_8_8",
+                "6_6_16",
+                "10_8_48",
+            ],
             "speculative_mab_window_size": 100,
-            "mem_fraction_static": 0.65,
+            "mem_fraction_static": 0.5,
         }
     else:
         raise ValueError(f"Unsupported speculative algorithm: {spec_algorithm}")
 
     # Create an LLM.
     llm = Engine(
-        model_path="/dataset/model/llama3.1/Llama-3.1-8B-Instruct",
+        model_path="/nobackup/model/llama3.1/Llama-3.1-8B-Instruct",
         dtype="float16",
         cuda_graph_max_bs=128,
+        max_running_requests=48,
         tp_size=1,
         **speculative_args,
     )

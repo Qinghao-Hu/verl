@@ -4,22 +4,31 @@ import hydra
 import ray
 from omegaconf import OmegaConf
 
+from verl.trainer.constants_ppo import get_ppo_ray_runtime_env
 from verl.trainer.main_ppo import create_rl_dataset, create_rl_sampler
 from verl.trainer.ppo.fastrl_trainer import RayFastRLTrainer
 from verl.trainer.ppo.reward import load_reward_manager
 from verl.utils import hf_processor, hf_tokenizer
 from verl.utils.dataset.rl_dataset import collate_fn
+from verl.utils.device import is_cuda_available
 from verl.utils.fs import copy_to_local
 
+# def main():
+#     cli_args = OmegaConf.from_cli()
+#     file_config = OmegaConf.load(getattr(cli_args, "config"))
+#     cli_args.pop("config", None)
 
-def main():
-    cli_args = OmegaConf.from_cli()
-    file_config = OmegaConf.load(getattr(cli_args, "config"))
-    cli_args.pop("config", None)
+#     config = OmegaConf.merge(file_config, cli_args)
+#     run_ppo(config)
 
-    config = OmegaConf.merge(file_config, cli_args)
+@hydra.main(config_path="config", config_name="fastrl_trainer", version_base=None)
+def main(config):
+    """Main entry point for PPO training with Hydra configuration management.
+
+    Args:
+        config_dict: Hydra configuration dictionary containing training parameters.
+    """
     run_ppo(config)
-
 
 def run_ppo(config) -> None:
     if not ray.is_initialized():
@@ -28,13 +37,17 @@ def run_ppo(config) -> None:
         # NCCL debug level, VLLM logging level, and allow runtime LoRA updating
         # `num_cpus` specifies the number of CPU cores Ray can use, obtained from the configuration
         ray.init(
-            runtime_env={"env_vars": {"TOKENIZERS_PARALLELISM": "true", "NCCL_DEBUG": "WARN", "VLLM_LOGGING_LEVEL": "WARN", "VLLM_ALLOW_RUNTIME_LORA_UPDATING": "true"}},
+            runtime_env=get_ppo_ray_runtime_env(),
             num_cpus=config.ray_init.num_cpus,
         )
 
     # Create a remote instance of the TaskRunner class, and
     # Execute the `run` method of the TaskRunner instance remotely and wait for it to complete
-    if OmegaConf.select(config.trainer, "profile_steps") is not None and len(OmegaConf.select(config.trainer, "profile_steps")) > 0:
+    if (
+        is_cuda_available
+        and config.trainer.get("profile_steps") is not None
+        and len(config.trainer.get("profile_steps", [])) > 0
+    ):
         nsight_options = OmegaConf.to_container(config.trainer.controller_nsight_options)
         runner = TaskRunner.options(runtime_env={"nsight": nsight_options}).remote()
     else:
@@ -55,41 +68,51 @@ class TaskRunner:
         OmegaConf.resolve(config)
 
         # download the checkpoint from hdfs
-        local_path = copy_to_local(config.actor_rollout_ref.model.path, use_shm=config.actor_rollout_ref.model.get("use_shm", False))
+        local_path = copy_to_local(
+            config.actor_rollout_ref.model.path, use_shm=config.actor_rollout_ref.model.get("use_shm", False)
+        )
 
         trust_remote_code = config.data.get("trust_remote_code", False)
         tokenizer = hf_tokenizer(local_path, trust_remote_code=trust_remote_code)
         # Used for multimodal LLM, could be None
         processor = hf_processor(local_path, trust_remote_code=trust_remote_code, use_fast=True)
 
-        # Version validation for vllm.
-        if config.actor_rollout_ref.rollout.name in ["vllm"]:
-            from verl.utils.vllm_utils import is_version_ge
-
-            if config.actor_rollout_ref.model.get("lora_rank", 0) > 0:
-                if not is_version_ge(pkg="vllm", minver="0.7.3"):
-                    raise NotImplementedError("PPO LoRA is not supported before vllm 0.7.3")
-
         # Define worker classes based on the actor strategy.
-        if config.actor_rollout_ref.actor.strategy in ["fsdp", "fsdp2"]:
-            assert config.critic.strategy in ["fsdp", "fsdp2"]
+        if config.actor_rollout_ref.actor.strategy in {"fsdp", "fsdp2"}:
+            assert config.critic.strategy in {"fsdp", "fsdp2"}
             from verl.single_controller.ray import RayWorkerGroup
-            from verl.workers.fsdp_workers import (ActorRolloutRefWorker,
-                                                   AsyncActorRolloutRefWorker,
-                                                   CriticWorker)
+            from verl.workers.fsdp_workers import ActorRolloutRefWorker, AsyncActorRolloutRefWorker
 
-            actor_rollout_cls = AsyncActorRolloutRefWorker if config.actor_rollout_ref.rollout.mode == "async" else ActorRolloutRefWorker
+            use_legacy_worker_impl = config.trainer.get("use_legacy_worker_impl", "auto")
+            if use_legacy_worker_impl in ["auto", "enable"]:
+                # import warnings
+                # warnings.warn(f"Legacy worker impl is going to be deprecated, will be removed in the future. \
+                #   Please set trainer.use_legacy_worker_impl = false to switch to the new worker implementation.")
+                from verl.workers.fsdp_workers import CriticWorker
+            elif use_legacy_worker_impl == "disable":
+                from verl.workers.roles import CriticWorker
+
+                print("Using new worker implementation")
+            else:
+                raise ValueError(f"Invalid use_legacy_worker_impl: {use_legacy_worker_impl}")
+
+            actor_rollout_cls = (
+                AsyncActorRolloutRefWorker
+                if config.actor_rollout_ref.rollout.mode == "async"
+                else ActorRolloutRefWorker
+            )
             ray_worker_group_cls = RayWorkerGroup
 
         elif config.actor_rollout_ref.actor.strategy == "megatron":
             assert config.actor_rollout_ref.actor.strategy == config.critic.strategy
-            from verl.single_controller.ray.megatron import \
-                NVMegatronRayWorkerGroup
-            from verl.workers.megatron_workers import (
-                ActorRolloutRefWorker, AsyncActorRolloutRefWorker,
-                CriticWorker)
+            from verl.single_controller.ray.megatron import NVMegatronRayWorkerGroup
+            from verl.workers.megatron_workers import ActorRolloutRefWorker, AsyncActorRolloutRefWorker, CriticWorker
 
-            actor_rollout_cls = AsyncActorRolloutRefWorker if config.actor_rollout_ref.rollout.mode == "async" else ActorRolloutRefWorker
+            actor_rollout_cls = (
+                AsyncActorRolloutRefWorker
+                if config.actor_rollout_ref.rollout.mode == "async"
+                else ActorRolloutRefWorker
+            )
             ray_worker_group_cls = NVMegatronRayWorkerGroup
 
         else:
@@ -118,7 +141,7 @@ class TaskRunner:
         # finally, we combine all the rewards together
         # The reward type depends on the tag of the data
         if config.reward_model.enable:
-            if config.reward_model.strategy in ["fsdp", "fsdp2"]:
+            if config.reward_model.strategy in {"fsdp", "fsdp2"}:
                 from verl.workers.fsdp_workers import RewardModelWorker
             elif config.reward_model.strategy == "megatron":
                 from verl.workers.megatron_workers import RewardModelWorker
@@ -132,12 +155,18 @@ class TaskRunner:
             role_worker_mapping[Role.RefPolicy] = ray.remote(ActorRolloutRefWorker)
             mapping[Role.RefPolicy] = global_pool_id
 
-        reward_fn = load_reward_manager(config, tokenizer, num_examine=0, **config.reward_model.get("reward_kwargs", {}))
-        val_reward_fn = load_reward_manager(config, tokenizer, num_examine=1, **config.reward_model.get("reward_kwargs", {}))
+        # Load the reward manager for training and validation.
+        reward_fn = load_reward_manager(
+            config, tokenizer, num_examine=0, **config.reward_model.get("reward_kwargs", {})
+        )
+        val_reward_fn = load_reward_manager(
+            config, tokenizer, num_examine=1, **config.reward_model.get("reward_kwargs", {})
+        )
         resource_pool_manager = ResourcePoolManager(resource_pool_spec=resource_pool_spec, mapping=mapping)
 
-        train_dataset = create_rl_dataset(config.data.train_files, config.data, tokenizer, processor)
-        val_dataset = create_rl_dataset(config.data.val_files, config.data, tokenizer, processor)
+        # Create training and validation datasets.
+        train_dataset = create_rl_dataset(config.data.train_files, config.data, tokenizer, processor, is_train=True)
+        val_dataset = create_rl_dataset(config.data.val_files, config.data, tokenizer, processor, is_train=False)
         train_sampler = create_rl_sampler(config.data, train_dataset)
 
         trainer = RayFastRLTrainer(
