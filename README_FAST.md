@@ -16,7 +16,7 @@ pip install -e .
 Install liger-kernel and flash_attn
 ```bash
 pip install liger-kernel
-pip install https://github.com/Dao-AILab/flash-attention/releases/download/v2.8.0.post2/flash_attn-2.8.0.post2+cu12torch2.7cxx11abiTRUE-cp312-cp312-linux_x86_64.whl
+pip install https://github.com/Dao-AILab/flash-attention/releases/download/v2.8.2/flash_attn-2.8.2+cu12torch2.7cxx11abiTRUE-cp312-cp312-linux_x86_64.whl
 ```
 
 
@@ -24,7 +24,7 @@ Install SGLang
 
 ```bash
 cd third-party/sglang
-pip install -e "python[dev]" --find-links https://flashinfer.ai/whl/cu124/torch2.5/flashinfer-python
+pip install -e "python[all]"
 ```
 If your editor cannot find the sglang module, you can add the following to your `.env` file:
 ```bash
