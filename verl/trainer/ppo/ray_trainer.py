@@ -307,7 +307,7 @@ class RayPPOTrainer:
         tokenizer,
         role_worker_mapping: dict[Role, WorkerType],
         resource_pool_manager: ResourcePoolManager,
-        ray_worker_group_cls: RayWorkerGroup = RayWorkerGroup,
+        ray_worker_group_cls: type[RayWorkerGroup] = RayWorkerGroup,
         processor=None,
         reward_fn=None,
         val_reward_fn=None,
@@ -705,6 +705,8 @@ class RayPPOTrainer:
             test_batch.meta_info["validate"] = True
 
             # evaluate using reward_function
+            if self.val_reward_fn is None:
+                raise ValueError("val_reward_fn must be provided for validation.")
             result = self.val_reward_fn(test_batch, return_dict=True)
             reward_tensor = result["reward_tensor"]
             scores = reward_tensor.sum(-1).cpu().tolist()
@@ -1120,6 +1122,9 @@ class RayPPOTrainer:
                         gen_batch_output.meta_info.pop("timing", None)
 
                     if self.config.algorithm.adv_estimator == AdvantageEstimator.REMAX:
+                        if self.reward_fn is None:
+                            raise ValueError("A reward_fn is required for REMAX advantage estimation.")
+
                         with marked_timer("gen_max", timing_raw, color="purple"):
                             gen_baseline_batch = deepcopy(gen_batch)
                             gen_baseline_batch.meta_info["do_sample"] = False
