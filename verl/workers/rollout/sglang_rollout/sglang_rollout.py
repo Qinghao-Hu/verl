@@ -71,6 +71,7 @@ from verl.workers.rollout.schemas import (
     Message,
 )
 from verl.workers.rollout.sglang_rollout.utils import broadcast_pyobj
+from verl.workers.rollout.sglang_rollout.worker_manager import RolloutDrafterManager
 
 try:
     from sglang.srt.function_call.function_call_parser import FunctionCallParser
@@ -288,6 +289,26 @@ class SGLangRollout(BaseRollout):
         self._device_mesh_cpu = device_mesh
         os.environ.setdefault("SGL_DISABLE_TP_MEMORY_INBALANCE_CHECK", "true")
 
+        self.use_spec = False
+        if hasattr(self.config, "speculative") and self.config.speculative.enable:
+            self.use_spec = True
+
+        if self.use_spec:
+            self.speculative_args = {
+                "speculative_algorithm": self.config.speculative.spec_strategy,
+                "speculative_draft_model_path": self.config.speculative.eagle.spec_model_path,
+                "speculative_num_steps": self.config.speculative.eagle.spec_steps,
+                "speculative_eagle_topk": self.config.speculative.eagle.spec_topk,
+                "speculative_num_draft_tokens": self.config.speculative.eagle.spec_verify_tokens,
+                "speculative_eagle_mab_algorithm": self.config.speculative.eagle.tune_algorithm,
+                "speculative_eagle_mab_configs": ["8_8_32", "8_8_16", "8_8_8"],
+                "max_running_requests": 32,
+                "disable_overlap_schedule": True,
+                "enable_mixed_chunk": False,
+            }
+        else:
+            self.speculative_args = {}
+
         (
             self._tool_schemas,
             self._tool_map,
@@ -323,6 +344,14 @@ class SGLangRollout(BaseRollout):
                 self.pad_token_id = self.processing_class.tokenizer.pad_token_id
             except AttributeError as e:
                 raise ValueError(f"Cannot get pad_token_id from processing_class {self.processing_class}") from e
+
+        # Initialize early memory release manager conditionally
+        self._generation_futures = {}  # Track ongoing generations per worker
+        self._batch_completion_event = asyncio.Event()
+
+        self.drafter_manager = RolloutDrafterManager(device_mesh=self._device_mesh_cpu, rollout_config=self.config)
+        self.drafter_manager_initialized = False
+        self._training_check_task = None
 
     def _init_distributed_env(self, device_mesh_cpu, **kwargs):
         self._device_mesh_cpu = device_mesh_cpu
@@ -440,7 +469,7 @@ class SGLangRollout(BaseRollout):
             os.environ["SGLANG_BLOCK_NONZERO_RANK_CHILDREN"] = "0"
             self._engine = AsyncEngine(
                 model_path=actor_module,
-                dtype=self.config.dtype,
+                dtype=self.config.dtype,  # TODO (Qinghao) FIXME "float16"
                 mem_fraction_static=self.config.gpu_memory_utilization,
                 enable_memory_saver=True,
                 base_gpu_id=0,
@@ -461,16 +490,22 @@ class SGLangRollout(BaseRollout):
                 # log_requests=True,
                 # log_requests_level=2,
                 # max_running_requests=1,
-                mm_attention_backend="fa3",
+                # mm_attention_backend="fa3",
                 attention_backend="fa3",
                 # In async mode, we want token in token out.
                 skip_tokenizer_init=self.config.mode == "async",
+                **self.speculative_args,
             )
         else:
             self._engine = None
 
         self.sharding_manager = None
         self.is_sleep = True
+
+    def _init_draft_model_weights(self, model_path: str):
+        """Initialize the draft model weights for speculative rollout."""
+        if self._engine is None:
+            return
 
     def _init_sampling_params(self, **kwargs):
         kwargs = dict(
@@ -620,6 +655,14 @@ class SGLangRollout(BaseRollout):
         Note that in GRPO, if the prompts are validated, we repeat the prompts for rollout.n times in ray_trainer.
         Thus we do not need to repeat the prompts here and set the sampling parameter n to 1.
         """
+        if not self.drafter_manager_initialized:
+            loop = asyncio.get_event_loop()
+            loop.run_until_complete(self.drafter_manager.initialize())
+            self.drafter_manager_initialized = True
+
+        # Reset batch completion event
+        self._batch_completion_event.clear()
+
         # input ids: (bs, prompt_length), left-padded
         idx = prompts.batch["input_ids"]
         # attention_mask: (bs, seq_length), left-padded
@@ -710,37 +753,70 @@ class SGLangRollout(BaseRollout):
         request_sampling_params.update(kwargs)
         if self._tp_rank == 0:
             loop = asyncio.get_event_loop()
-            async def _generate_and_sleep():
-                output = await self._engine.async_generate(
-                    prompt=None,  # because we have already convert it to prompt token id
-                    sampling_params=request_sampling_params,
-                    return_logprob=True,
-                    input_ids=idx_list,
-                    image_data=image_list,
-                )
-                dp_rank = self._device_mesh_cpu["dp"].get_local_rank()
 
-                # Early memory release: release memory immediately after generation completes
-                if self.sharding_manager is not None:
-                    # Release memory immediately for this worker
-                    worker_id = dp_rank  # Use dp_rank as worker identifier
-                    await self.sharding_manager.release_memory_immediately(worker_id)
-                return output
-
-            output = loop.run_until_complete(_generate_and_sleep())
+            output = loop.run_until_complete(self._generate_with_drafter(idx_list, image_list, request_sampling_params))
         else:
             output = None
 
-        # Most naive implementation, can extract tensor and send via gloo if too slow
-        # dist.barrier()
-        [output] = broadcast_pyobj(
-            data=[output],
-            rank=self._rank,
-            dist_group=self._device_mesh_cpu["tp"].get_group(),
-            src=self._device_mesh_cpu["tp"].mesh[0].item(),
-            force_cpu_device=False,
-        )
-        out = _post_process_outputs(self.processing_class, output)
+        # Handle early release with non-blocking broadcast for long-tail generation
+        # Only the master TP rank (tp_rank=0) generates, others receive None and must wait
+        # But we want to allow individual workers to proceed independently
+        if self.config.enable_drafter_train and self.drafter_manager:
+            # For early memory release, use a more flexible approach
+            if self._tp_rank == 0:
+                # Master TP rank has the output, share it with other TP ranks in this DP group
+                # But use a timeout to avoid blocking indefinitely
+                try:
+                    [output] = broadcast_pyobj(
+                        data=[output],
+                        rank=self._rank,
+                        dist_group=self._device_mesh_cpu["tp"].get_group(),
+                        src=self._device_mesh_cpu["tp"].mesh[0].item(),
+                        force_cpu_device=False,
+                    )
+                except Exception as e:
+                    logger.warning(f"Worker {self._rank} broadcast failed: {e}, using local output")
+            else:
+                # Non-master TP ranks receive the output
+                try:
+                    [output] = broadcast_pyobj(
+                        data=[None],  # Non-master ranks send None
+                        rank=self._rank,
+                        dist_group=self._device_mesh_cpu["tp"].get_group(),
+                        src=self._device_mesh_cpu["tp"].mesh[0].item(),
+                        force_cpu_device=False,
+                    )
+                except Exception as e:
+                    logger.error(f"Worker {self._rank} failed to receive broadcast: {e}")
+                    # Create dummy output for consistency
+                    output = None
+        else:
+            # Original synchronous broadcast for non-early-release mode
+            [output] = broadcast_pyobj(
+                data=[output],
+                rank=self._rank,
+                dist_group=self._device_mesh_cpu["tp"].get_group(),
+                src=self._device_mesh_cpu["tp"].mesh[0].item(),
+                force_cpu_device=False,
+            )
+        # Handle case where output might be None for non-master TP ranks
+        if output is not None:
+            out = _post_process_outputs(self.processing_class, output)
+        else:
+            logger.warning(f"Worker {self._rank} received None output, creating dummy response")
+            # Create dummy output - this should not happen in normal operation
+            # but provides fallback for debugging
+            device = idx.device
+            batch_size = idx.size(0)
+            dummy_response = torch.full(
+                (batch_size, self.config.response_length), self.pad_token_id, device=device, dtype=idx.dtype
+            )
+            dummy_logprobs = None
+            if self.config.calculate_log_probs:
+                dummy_logprobs = torch.zeros(
+                    (batch_size, self.config.response_length), device=device, dtype=torch.float32
+                )
+            out = (dummy_response, dummy_logprobs) if dummy_logprobs is not None else (dummy_response,)
 
         response = out[0].to(idx.device)
         rollout_log_probs = None
@@ -793,7 +869,121 @@ class SGLangRollout(BaseRollout):
             loop = asyncio.get_event_loop()
             loop.run_until_complete(self._engine.flush_cache())
 
+        # Signal batch completion
+        self._batch_completion_event.set()
+
+        # Wait for training to complete if participating
+        if self.drafter_manager:
+            loop = asyncio.get_event_loop()
+
+            # Check if this worker is in training before marking as completed
+            if self.drafter_manager.background_trainer.is_training_active:
+                logger.info(f"Worker {dist.get_rank()} is participating in training, waiting for completion...")
+                # Wait for training to finish
+                max_wait = 60
+                wait_time = 0
+                while self.drafter_manager.background_trainer.is_training_active and wait_time < max_wait:
+                    loop.run_until_complete(asyncio.sleep(1.0))
+                    wait_time += 1
+                    if wait_time % 10 == 0:
+                        logger.info(f"Worker {dist.get_rank()} still waiting for training... ({wait_time}s)")
+
+            # Now mark this worker as completed (with timeout to avoid hanging)
+            current_worker_id = dist.get_rank()
+            try:
+                # Use timeout to avoid hanging if coordinator is down
+                loop.run_until_complete(
+                    asyncio.wait_for(self.drafter_manager.mark_worker_completed(current_worker_id), timeout=3.0)
+                )
+            except asyncio.TimeoutError:
+                logger.warning(f"Worker {current_worker_id} timed out marking as completed (coordinator likely down)")
+
+            # Log completion status
+            status = self.drafter_manager.get_global_release_status()
+            logger.info(
+                f"Worker {current_worker_id} generation completed. "
+                f"Released: {status['total_released']}/{status['total_workers']}, "
+                f"Training: {len(status['training_workers'])} workers, "
+                f"All completed: {status.get('all_generation_complete', False)}"
+            )
+
+            # If this worker is training, wait for training to complete
+            if self.drafter_manager.background_trainer.is_training_active:
+                logger.info(f"Worker {current_worker_id} waiting for training to complete...")
+
+                # Wait for training to actually finish (with timeout)
+                max_wait = 60  # 60 seconds max wait
+                wait_time = 0
+                while self.drafter_manager.background_trainer.is_training_active and wait_time < max_wait:
+                    loop.run_until_complete(asyncio.sleep(1.0))
+                    wait_time += 1
+                    if wait_time % 10 == 0:
+                        logger.info(f"Worker {current_worker_id} still waiting for training... ({wait_time}s)")
+
+                # Shutdown training if still active
+                if self.drafter_manager.background_trainer.is_training_active:
+                    logger.info(f"Worker {current_worker_id} forcing training shutdown after {wait_time}s")
+                    try:
+                        loop.run_until_complete(
+                            asyncio.wait_for(self.drafter_manager.shutdown_background_training(), timeout=5.0)
+                        )
+                    except asyncio.TimeoutError:
+                        logger.warning(f"Worker {current_worker_id} shutdown timed out, continuing anyway")
+
         return DataProto(batch=batch, non_tensor_batch=non_tensor_batch)
+
+    async def _generate_with_drafter(self, idx_list, image_list, request_sampling_params):
+        """Generate sequences with early memory release using global coordination."""
+        current_worker_id = dist.get_rank()
+
+        # Start periodic training check if not already started
+        if self._training_check_task is None:
+
+            async def periodic_training_check():
+                while True:
+                    await asyncio.sleep(2.0)
+                    if self.drafter_manager and not self.drafter_manager.background_trainer.is_training_active:
+                        try:
+                            await self.drafter_manager._check_and_join_training()
+                        except Exception as e:
+                            logger.debug(f"Training check error: {e}")
+
+            self._training_check_task = asyncio.create_task(periodic_training_check())
+
+        async def _generate_and_release():
+            # Perform generation
+            output = await self._engine.async_generate(
+                prompt=None,
+                sampling_params=request_sampling_params,
+                return_logprob=True,
+                input_ids=idx_list,
+                image_data=image_list,
+            )
+            logger.info(f"Worker {current_worker_id} successfully generated sequences")
+
+            # FIRST: Release the actual GPU memory from inference
+            if self.sharding_manager is not None:
+                if self._tp_rank == 0:
+                    await self.sharding_manager.release_memory()
+                    logger.info(f"Worker {current_worker_id} released memory through sharding manager")
+
+            # Always empty the CUDA cache to free memory
+            torch.cuda.empty_cache()
+            logger.info(f"Worker {current_worker_id} emptied CUDA cache")
+
+            # Give a moment for any pending operations
+            await asyncio.sleep(0.5)
+
+            # THEN: Notify the coordinator and potentially start training
+            if self.drafter_manager:
+                success = await self.drafter_manager.release_worker_memory(current_worker_id)
+                logger.info(f"Worker {current_worker_id} memory release result: {success}")
+            return output
+
+        # Start generation
+        output = await _generate_and_release()
+
+        return output
 
     async def _async_rollout_a_request(
         self,
@@ -861,7 +1051,7 @@ class SGLangRollout(BaseRollout):
                         ]
                     )
                     _req.add_tool_response_messages(self.processing_class, [resp for resp, _, _ in tool_call_results])
-                    for tool_call, (resp, reward, metrics) in zip(parsed_tool_calls, tool_call_results, strict=True):
+                    for tool_call, (_, _, metrics) in zip(parsed_tool_calls, tool_call_results, strict=True):
                         _req.update_metrics(metrics, tool_call.function.name)
                     if len(_req.input_ids) >= self.config.max_model_len:
                         finish_reason_type = FinishReasonTypeEnum.STOP
@@ -1234,7 +1424,7 @@ class SGLangRollout(BaseRollout):
             non_tensor_batch=non_tensor_batch,
         )
 
-    def _preprocess_prompt_to_async_rollout_requests(self, prompts: DataProto, n: int = 1) -> list[AsyncRolloutRequest]:
+    def _preprocess_prompt_to_async_rollout_requests(self, prompts: DataProto) -> list[AsyncRolloutRequest]:
         assert "raw_prompt" in prompts.non_tensor_batch, (
             "need data.return_raw_chat=True, due to no official way do parse_messages"
         )
@@ -1380,7 +1570,7 @@ class SGLangRollout(BaseRollout):
         # this function is left for uniform train-inference resharding
 
     async def generate(
-        self, prompt_ids: torch.Tensor, sampling_params: dict[str, Any], request_id: str
+        self, prompt_ids: torch.Tensor, sampling_params: dict[str, Any], _request_id: str
     ) -> torch.Tensor:
         request_sampling_params = self.sampling_params.copy()
         request_sampling_params.update(sampling_params)

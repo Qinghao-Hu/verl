@@ -27,6 +27,7 @@ try:
     from sglang.srt.utils import TorchPatchMultiprocessingSerializer as MultiprocessingSerializer
 except ImportError:
     from sglang.srt.utils import MultiprocessingSerializer
+
 from torch.distributed.device_mesh import DeviceMesh
 from torch.distributed.fsdp.api import FullStateDictConfig, ShardedStateDictConfig, StateDictType
 from torch.distributed.fsdp.fully_sharded_data_parallel import FullyShardedDataParallel as FSDP
@@ -182,18 +183,6 @@ class FSDPSGLangShardingManager(BaseShardingManager):
         if self.device_mesh["infer_tp"].get_local_rank() == 0 and self.rollout_config.free_cache_engine:
             await self.inference_engine.release_memory_occupation()
 
-    async def release_memory_immediately(self, worker_id: int):
-        if self.device_mesh["infer_tp"].get_local_rank() == 0 and self.rollout_config.free_cache_engine:
-            # Check if the engine has async release_memory_immediately method
-            if hasattr(self.inference_engine, "release_memory_immediately") and asyncio.iscoroutinefunction(
-                self.inference_engine.release_memory_immediately
-            ):
-                await self.inference_engine.release_memory_immediately(worker_id=worker_id)
-            else:
-                # Fallback to regular memory release if async version not available
-                logger.warning("Async release_memory_immediately not available, using regular release_memory")
-                await self.inference_engine.release_memory_occupation()
-
     @GPUMemoryLogger(role="FSDPSGLangShardingManager enter", logger=logger)
     async def wake_up(self):
         get_torch_device().empty_cache()
@@ -243,11 +232,10 @@ class FSDPSGLangShardingManager(BaseShardingManager):
             get_torch_device().set_rng_state(self.gen_random_states)
 
     @GPUMemoryLogger(role="FSDPSGLangShardingManager exit", logger=logger)
-    async def sleep(self, worker_id: int | None = None):
+    async def sleep(self):
         if self.rollout_config.free_cache_engine:
             log_gpu_memory_usage("Before SGLang offload in sharding manager", logger=logger)
-            # await self.release_memory()
-            await self.release_memory_immediately(worker_id=worker_id)
+            await self.release_memory()
             log_gpu_memory_usage("After SGLang offload in sharding manager", logger=logger)
 
         self.module.train()

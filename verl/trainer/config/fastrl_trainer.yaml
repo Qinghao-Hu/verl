@@ -5,22 +5,21 @@
 # 4. Indentation level is respected for nested fields.
 
 speculative:
-  enable: False
+  enable: True
   spec_strategy: "eagle" # "eagle" | "eagle3" | "ngram" | "combined" | "combined3"
   threshold: 0.8
   eagle:
-    model_path: null # path to the eagle model if not initialized from scratch
-    draft_tp_size: 1
-    eagle_step: 5 # (vllm) num_speculative_tokens
-    eagle_max_batch_size: null # (vllm) speculative_disable_by_batch_size
-    eagle_max_seq_len: null # (vllm) speculative_max_model_len
-    eagle_fr_map_path: null # vocab size reduction
+    spec_model_path: /nobackup/model/eagle-sgl/sglang-EAGLE-Llama-3.1-Instruct-8B
+    spec_steps: 8
+    spec_topk: 8
+    spec_verify_tokens: 48
+    tune_algorithm: "BEG"
   ngram:
-    ngram_step: 5 # (vllm) num_speculative_tokens
+    ngram_step: 5 
     ngram_lookup_max: 10
     ngram_lookup_min: 5
-    ngram_max_batch_size: null # (vllm) speculative_disable_by_batch_size
-    ngram_max_seq_len: null # (vllm) speculative_max_model_len
+    ngram_max_batch_size: null
+    ngram_max_seq_len: null
   train:
     batch_size: 1024
     max_seq_len: 8192

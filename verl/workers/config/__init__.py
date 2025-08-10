@@ -12,10 +12,13 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from .critic import *  # noqa
 from .actor import *  # noqa
+from .critic import *  # noqa
+from .drafter import *  # noqa
 from .engine import *  # noqa
 from .optimizer import *  # noqa
-from . import actor, critic, engine, optimizer
 
-__all__ = actor.__all__ + critic.__all__ + engine.__all__ + optimizer.__all__
+from . import actor, critic, engine, optimizer, drafter  # noqa, isort:skip
+
+
+__all__ = actor.__all__ + critic.__all__ + engine.__all__ + optimizer.__all__ + drafter.__all__
