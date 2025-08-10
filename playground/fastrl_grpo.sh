@@ -11,7 +11,7 @@ EXPERIMENT_NAME=debug-split
 # DATA_PATH='/nobackup/qinghao/dataset/reasoning/DAPO-Math-17k'
 DATA_PATH=/nobackup/qinghao/dataset/reasoning/gsm8k
 # SFT_MODEL_PATH=/nobackup/model/qwen2.5/Qwen2.5-Math-7B
-SFT_MODEL_PATH=/local/model/qwen3/Qwen3-0.6B
+SFT_MODEL_PATH=/local/model/llama3.1/Llama-3.1-8B-Instruct
 CKPT_PATH='/nobackup/qinghao/runs/reasoning'
 
 
@@ -21,6 +21,10 @@ CKPT_PATH='/nobackup/qinghao/runs/reasoning'
 rollout_mode="sync"
 rollout_name="sglang"
 
+export RAY_DEBUG_POST_MORTEM=1
+
+rm -rf /nobackup/qinghao/runs/reasoning/*
+
 python3 -m verl.trainer.main_fastrl \
     ray_init.num_cpus=96 \
     data.train_files=$DATA_PATH/train.parquet \
@@ -29,7 +33,7 @@ python3 -m verl.trainer.main_fastrl \
     data.return_full_prompt=True \
     data.train_batch_size=128 \
     data.max_prompt_length=512 \
-    data.max_response_length=1024 \
+    data.max_response_length=2048 \
     data.filter_overlong_prompts=True \
     data.truncation='error' \
     actor_rollout_ref.model.path=$SFT_MODEL_PATH \
@@ -50,7 +54,7 @@ python3 -m verl.trainer.main_fastrl \
     actor_rollout_ref.rollout.name=$rollout_name \
     actor_rollout_ref.rollout.mode=$rollout_mode \
     actor_rollout_ref.rollout.multi_turn.format=hermes \
-    actor_rollout_ref.rollout.gpu_memory_utilization=0.6 \
+    actor_rollout_ref.rollout.gpu_memory_utilization=0.5 \
     actor_rollout_ref.rollout.temperature=0.6 \
     actor_rollout_ref.rollout.max_num_batched_tokens=32768 \
     actor_rollout_ref.rollout.n=4 \
@@ -58,7 +62,7 @@ python3 -m verl.trainer.main_fastrl \
     algorithm.adv_estimator=grpo \
     algorithm.use_kl_in_reward=False \
     trainer.critic_warmup=0 \
-    trainer.logger='["console","wandb"]' \
+    trainer.logger='["console"]' \
     trainer.project_name=$PROJECT_NAME \
     trainer.experiment_name=$EXPERIMENT_NAME \
     trainer.default_local_dir=$CKPT_PATH/$PROJECT_NAME/$EXPERIMENT_NAME \
@@ -69,5 +73,5 @@ python3 -m verl.trainer.main_fastrl \
     trainer.test_freq=-1 \
     trainer.total_epochs=1 $@
     
-
+# ,"wandb"
 # srun -J grpo -N 1 --exclusive bash playground/fastrl_grpo.sh

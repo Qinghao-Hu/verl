@@ -8,6 +8,7 @@
 
 export VLLM_ATTENTION_BACKEND=FLASH_ATTN
 export TOKENIZERS_PARALLELISM=true
+export NCCL_DEBUG=WARN
 export WANDB_API_KEY='be32ec2a18acdc347b5d3029742c0ef1090a9e1e'
 export NUMEXPR_MAX_THREADS=160
 export MKL_SERVICE_FORCE_INTEL=1
@@ -16,7 +17,6 @@ PROJECT_NAME='Qwen3-RL'
 EXPERIMENT_NAME='debug-split'
 
 DATA_PATH=/nobackup/qinghao/dataset/reasoning/gsm8k
-# SFT_MODEL_PATH=/nobackup/model/qwen3/Qwen3-8B
 SFT_MODEL_PATH=/local/model/qwen3/Qwen3-0.6B
 
 # # make openai client happy
@@ -51,7 +51,7 @@ python3 -u -m verl.trainer.main_ppo \
     actor_rollout_ref.rollout.log_prob_micro_batch_size_per_gpu=16 \
     actor_rollout_ref.rollout.tensor_model_parallel_size=2 \
     actor_rollout_ref.rollout.name=sglang \
-    actor_rollout_ref.rollout.mode=sync \
+    actor_rollout_ref.rollout.mode=async \
     actor_rollout_ref.rollout.gpu_memory_utilization=0.6 \
     actor_rollout_ref.rollout.n=2 \
     actor_rollout_ref.ref.log_prob_micro_batch_size_per_gpu=16 \

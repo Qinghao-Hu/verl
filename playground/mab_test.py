@@ -40,20 +40,20 @@ def main():
     elif spec_algorithm == "EAGLE":
         speculative_args = {
             "speculative_algorithm": "EAGLE",
-            "speculative_draft_model_path": "/nobackup/model/eagle-sgl/sglang-EAGLE-LLaMA3-Instruct-8B",
+            "speculative_draft_model_path": "/nobackup/model/eagle-sgl/sglang-EAGLE-Llama-3.1-Instruct-8B",
             "speculative_num_steps": 8,
             "speculative_eagle_topk": 8,
             "speculative_num_draft_tokens": 48,
-            "speculative_eagle_mab_algorithm": "BEG",  # "EG", "PREDEFINED", "UCB1", "BEG"
-            "speculative_eagle_mab_configs": [
-                "8_8_32",
-                "8_8_16",
-                "8_8_8",
-                "6_6_16",
-                "10_8_48",
-            ],
-            "speculative_mab_window_size": 100,
-            "mem_fraction_static": 0.5,
+            # "speculative_eagle_mab_algorithm": "BEG",  # "EG", "PREDEFINED", "UCB1", "BEG"
+            # "speculative_eagle_mab_configs": [
+            #     "8_8_32",
+            #     "8_8_16",
+            #     "8_8_8",
+            #     "6_6_16",
+            #     "10_8_48",
+            # ],
+            # "speculative_mab_window_size": 100,
+            "mem_fraction_static": 0.6,
         }
     else:
         raise ValueError(f"Unsupported speculative algorithm: {spec_algorithm}")
@@ -62,9 +62,11 @@ def main():
     llm = Engine(
         model_path="/nobackup/model/llama3.1/Llama-3.1-8B-Instruct",
         dtype="float16",
-        cuda_graph_max_bs=128,
-        max_running_requests=48,
-        tp_size=1,
+        # cuda_graph_max_bs=128,
+        max_running_requests=16,
+        tp_size=2,
+        mm_attention_backend="fa3",
+        attention_backend="fa3",
         **speculative_args,
     )
 

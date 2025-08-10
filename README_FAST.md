@@ -18,13 +18,16 @@ Install liger-kernel and flash_attn
 pip install liger-kernel
 pip install https://github.com/Dao-AILab/flash-attention/releases/download/v2.8.2/flash_attn-2.8.2+cu12torch2.7cxx11abiTRUE-cp312-cp312-linux_x86_64.whl
 ```
+/home/qinghao/workdir/sglang/flash-attention/dist/flash_attn-2.8.2-cp312-cp312-linux_x86_64.whl
 
+# Need use reinstall
 
 Install SGLang
 
 ```bash
 cd third-party/sglang
 pip install -e "python[all]"
+pip install /home/qinghao/workdir/sglang/sgl-kernel/dist/sgl_kernel-0.3.3-cp310-abi3-linux_x86_64.whl
 ```
 If your editor cannot find the sglang module, you can add the following to your `.env` file:
 ```bash

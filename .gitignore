@@ -9,6 +9,10 @@ playground/bak/*
 **/*.tar.gz
 # **/playground
 **/wandb
+playground/archive
+playground/data
+playground/debug_batches
+playground/rollout_data
 
 # Byte-compiled / optimized / DLL files
 __pycache__/
