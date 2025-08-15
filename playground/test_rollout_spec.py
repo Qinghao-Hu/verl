@@ -50,7 +50,6 @@ def init_actor_rollout_wg(config: DictConfig):
         all_wg.update(spawn_wg)
     actor_rollout_wg = all_wg["actor_rollout"]
     actor_rollout_wg.init_model()
-    
 
     return actor_rollout_wg
 
@@ -69,7 +68,7 @@ def init_config() -> DictConfig:
     config.actor_rollout_ref.rollout.gpu_memory_utilization = 0.6
     config.actor_rollout_ref.actor.strategy = "fsdp2"
     config.actor_rollout_ref.actor.use_dynamic_bsz=True
-    config.actor_rollout_ref.rollout.enable_drafter_train = True
+    config.actor_rollout_ref.rollout.enable_drafter_training = False
     # config.trainer.rollout_data_dir = "/home/qinghao/workdir/verl-dev/playground/rollout_data"
 
     # test sleep/wake_up with fsdp offload
