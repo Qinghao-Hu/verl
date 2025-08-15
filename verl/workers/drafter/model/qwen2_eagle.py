@@ -3,17 +3,14 @@ from typing import Callable, List, Optional, Tuple, Union
 import torch
 from torch import nn
 from transformers import Qwen2Config, Qwen2ForCausalLM
-from transformers.models.qwen2.modeling_qwen2 import (
-    Qwen2DecoderLayer as Qwen2DecoderLayerTF,
-    Qwen2Model as Qwen2ModelTF,
-    Qwen2RotaryEmbedding,
-)
-
 from transformers.cache_utils import Cache, DynamicCache
 from transformers.modeling_flash_attention_utils import FlashAttentionKwargs
 from transformers.modeling_outputs import BaseModelOutputWithPast, CausalLMOutputWithPast
+from transformers.models.qwen2.modeling_qwen2 import Qwen2DecoderLayer as Qwen2DecoderLayerTF
+from transformers.models.qwen2.modeling_qwen2 import Qwen2Model as Qwen2ModelTF
+from transformers.models.qwen2.modeling_qwen2 import Qwen2RotaryEmbedding
 from transformers.processing_utils import Unpack
-from transformers.utils import LossKwargs, logging
+from transformers.utils import TransformersKwargs, logging
 
 logger = logging.get_logger(__name__)
 
@@ -157,7 +154,7 @@ class Qwen2Model(Qwen2ModelTF):
         return output if return_dict else output.to_tuple()
 
 
-class KwargsForCausalLM(FlashAttentionKwargs, LossKwargs): ...
+class KwargsForCausalLM(FlashAttentionKwargs, TransformersKwargs): ...
 
 
 class Qwen2ForCausalLMEagle(Qwen2ForCausalLM):

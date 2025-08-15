@@ -4,9 +4,10 @@ import json
 import logging
 import os
 import time
+from copy import deepcopy
 
 import ray
-from omegaconf import DictConfig, OmegaConf
+from omegaconf import DictConfig, OmegaConf, open_dict
 
 from verl.protocol import DataProto
 from verl.single_controller.ray import RayClassWithInitArgs, RayWorkerGroup
@@ -66,9 +67,11 @@ def init_actor_rollout_wg(config: DictConfig):
 
 
 def init_config() -> DictConfig:
-    config = OmegaConf.load("/home/qinghao/workdir/verl-dev/verl/trainer/config/_generated_ppo_trainer.yaml")
+    config = OmegaConf.load("/home/qinghao/workdir/verl-dev/playground/debug_config.yaml")
     assert isinstance(config, DictConfig), "Expected DictConfig from OmegaConf.load"
-    model_path = "/local/model/qwen2.5/Qwen2.5-1.5B-Instruct"  # -Instruct
+    with open_dict(config.actor_rollout_ref.rollout):
+        config.actor_rollout_ref.rollout.speculative = deepcopy(config.speculative)
+    model_path = "/local/model/llama3.1/Llama-3.1-8B-Instruct"  # -Instruct
     config.actor_rollout_ref.model.path = model_path
     config.actor_rollout_ref.rollout.name = "sglang"
     config.actor_rollout_ref.rollout.mode = "sync"
@@ -114,11 +117,9 @@ def dump_generations(inputs, outputs, dump_path):
 # =========================== 1. Init rollout manager ===========================
 # runtime_env={"env_vars": {"TOKENIZERS_PARALLELISM": "true", "NCCL_DEBUG": "WARN", "RAY_DEBUG_POST_MORTEM": "0"}},
 
-ray.init(
-    num_cpus=96
-)
+ray.init(num_cpus=96)
 # data_path = "/home/qinghao/workdir/verl-dev/playground/gen_batch_example.pkl"
-data_path = "/home/qinghao/workdir/verl-dev/playground/debug_batches/gen_batch_example_infinite_qwen1_5B.pkl"
+data_path = "/home/qinghao/workdir/verl-dev/playground/debug_batches/gen_batch_example_infinite_llama.pkl"
 output_path = "/home/qinghao/workdir/verl-dev/playground/rollout_data"
 gen_batch = DataProto.load_from_disk(data_path)
 
@@ -135,7 +136,6 @@ actor_rollout_wg = init_actor_rollout_wg(config)
 
 start_time = time.time()
 # Run the normal generation which will now use early memory release
-print("\nStarting generation with early memory release...")
 result = actor_rollout_wg.generate_sequences(prompts=gen_batch)
 end_time = time.time()
 

@@ -20,13 +20,18 @@ speculative:
     ngram_max_batch_size: null
     ngram_max_seq_len: null
   train:
-    batch_size: 1024
+    enable_drafter_training: true
+    min_workers_for_training: 1
+    batch_size_per_gpu: 4
     max_seq_len: 8192
+    max_epochs: 10
+    checkpoint_path: null
     optim:
       lr: 1e-6
       lr_warmup_steps: -1
-      min_lr_ratio: null   # only useful for warmup with cosine
-      warmup_style: constant  # select from constant/cosine
+      min_lr_ratio: null   
+      warmup_style: constant 
+    
 
 actor_rollout_ref:
   actor:

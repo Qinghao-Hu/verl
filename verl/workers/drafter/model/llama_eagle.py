@@ -3,16 +3,14 @@ from typing import Callable, List, Optional, Tuple, Union
 import torch
 from torch import nn
 from transformers import LlamaConfig, LlamaForCausalLM
-from transformers.models.llama.modeling_llama import (
-    LlamaDecoderLayer as LlamaDecoderLayerTF,
-    LlamaModel as LlamaModelTF,
-    LlamaRotaryEmbedding,
-)
 from transformers.cache_utils import Cache, DynamicCache
 from transformers.modeling_flash_attention_utils import FlashAttentionKwargs
 from transformers.modeling_outputs import BaseModelOutputWithPast, CausalLMOutputWithPast
+from transformers.models.llama.modeling_llama import LlamaDecoderLayer as LlamaDecoderLayerTF
+from transformers.models.llama.modeling_llama import LlamaModel as LlamaModelTF
+from transformers.models.llama.modeling_llama import LlamaRotaryEmbedding
 from transformers.processing_utils import Unpack
-from transformers.utils import LossKwargs, logging
+from transformers.utils import TransformersKwargs, logging
 
 logger = logging.get_logger(__name__)
 
@@ -155,8 +153,6 @@ class LlamaModel(LlamaModelTF):
         return output if return_dict else output.to_tuple()
 
 
-class KwargsForCausalLM(FlashAttentionKwargs, LossKwargs): ...
-
 
 class LlamaForCausalLMEagle(LlamaForCausalLM):
     def __init__(self, config: LlamaConfig) -> None:
@@ -179,7 +175,7 @@ class LlamaForCausalLMEagle(LlamaForCausalLM):
         return_dict: Optional[bool] = None,
         cache_position: Optional[torch.LongTensor] = None,
         logits_to_keep: Union[int, torch.Tensor] = 0,
-        **kwargs: Unpack[KwargsForCausalLM],
+        **kwargs: Unpack[TransformersKwargs],
     ) -> Union[Tuple, CausalLMOutputWithPast]:
         output_attentions = output_attentions if output_attentions is not None else self.config.output_attentions
         output_hidden_states = output_hidden_states if output_hidden_states is not None else self.config.output_hidden_states

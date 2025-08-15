@@ -2,6 +2,7 @@ import asyncio
 import logging
 import os
 import socket
+import threading
 import time
 from dataclasses import dataclass
 from enum import Enum
@@ -14,6 +15,7 @@ import zmq.error
 from torch.distributed.device_mesh import DeviceMesh
 
 from verl.workers.drafter.background_trainer import BackgroundTrainer
+from verl.workers.drafter.eagle_background_trainer import EagleBackgroundTrainer
 
 logger = logging.getLogger(__name__)
 logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "INFO"))
@@ -65,12 +67,12 @@ class CentralCoordinator:
         self.completed_workers: Set[int] = set()
         self.training_started = False
         self.tp_size = tp_size
-
+        self._stopped = False
         logger.info(f"Central coordinator started on port {port}, tp_size={tp_size}")
 
     async def run(self):
         """Main coordinator loop."""
-        while True:
+        while not self._stopped:
             try:
                 # Receive request with timeout
                 poller = zmq.asyncio.Poller()
@@ -97,9 +99,19 @@ class CentralCoordinator:
                 # Try to send error response if socket is in correct state
                 try:
                     await self.socket.send_json({"status": "error", "message": str(e)})
-                except:
+                except Exception:
                     # Socket might be in wrong state, skip
                     pass
+
+        # Loop exiting -> perform cleanup
+        try:
+            self.socket.close(0)
+        finally:
+            self.context.term()
+
+    def stop(self):
+        """Signal the run loop to stop."""
+        self._stopped = True
 
     async def _process_request(self, message: dict) -> dict:
         """Process incoming request and return response."""
@@ -260,8 +272,8 @@ class CentralCoordinator:
             if w_id in self.worker_states:
                 released_dp_workers.add(self.worker_states[w_id].dp_rank)
 
-        # Use the configured min_workers or default to half
-        min_dp_workers = 1  # TODO: make this configurable, for now use 1 for testing
+        # Use configured threshold for minimum DP workers (default=1)
+        min_dp_workers = getattr(self, "min_workers_for_training", 1) or 1
 
         # Check conditions
         released_dp_count = len(released_dp_workers)
@@ -298,9 +310,9 @@ class CentralCoordinator:
         return False
 
     async def cleanup(self):
-        """Clean up resources."""
-        self.socket.close()
-        self.context.term()
+        """Signal coordinator loop to stop; resources close when run loop exits."""
+        self.stop()
+        # Actual socket/context closed in run loop termination
 
 
 class WorkerClient:
@@ -371,7 +383,7 @@ class WorkerClient:
                 # Reset socket connection immediately to clear state
                 try:
                     self.socket.close()
-                except:
+                except Exception:
                     pass  # Socket might already be closed
 
                 self.socket = self.context.socket(zmq.REQ)
@@ -403,7 +415,7 @@ class WorkerClient:
                         # Always reset socket on any error
                         try:
                             self.socket.close()
-                        except:
+                        except Exception:
                             pass
                         self.socket = self.context.socket(zmq.REQ)
                         self.socket.connect(self.coordinator_address)
@@ -434,7 +446,7 @@ class WorkerClient:
                     # Reset socket to clear any invalid state
                     try:
                         self.socket.close()
-                    except:
+                    except Exception:
                         pass
 
                     self.socket = self.context.socket(zmq.REQ)
@@ -487,16 +499,39 @@ class RolloutDrafterManager:
         # Coordinator setup
         self.coordinator = None
         self.worker_client = None
-        self.coordinator_task = None
 
         # Only rank 0 runs coordinator
         self.is_coordinator = self.rank == 0
+        self._coord_thread: Optional[threading.Thread] = None
 
         # Background training
         self._training_task: Optional[asyncio.Task] = None
         self._monitor_task: Optional[asyncio.Task] = None
         self._shutdown_event = asyncio.Event()
-        self.background_trainer = BackgroundTrainer(self.rank)
+
+        # Check if eagle training is enabled
+        use_eagle = (
+            hasattr(rollout_config, "speculative")
+            and rollout_config.speculative.get("enable", False)
+            and rollout_config.speculative.get("eagle", {}).get("enable_online_training", False)
+        )
+
+        if use_eagle:
+            eagle_train_config = {
+                "spec_strategy": rollout_config.speculative.spec_strategy,
+                "max_epochs": rollout_config.speculative.train.get("max_epochs", 10),
+                "batch_size_per_gpu": rollout_config.speculative.train.get("batch_size_per_gpu", 4),
+                "checkpoint_path": rollout_config.speculative.train.get("checkpoint_path", None),
+                "vloss_weight": 1.0,
+                "ploss_weight": 0.1,
+                "data_augment_std": 0.2,
+            }
+            self.background_trainer = EagleBackgroundTrainer(self.rank, eagle_train_config)
+            logger.info(f"Worker {self.rank} using EagleBackgroundTrainer for speculative decoding")
+        else:
+            self.background_trainer = BackgroundTrainer(self.rank)
+            logger.info(f"Worker {self.rank} using default BackgroundTrainer")
+
         # Lifecycle flags
         self._training_coordination_done = False  # Set True once coordinator has executed training setup
         # Local fast-path completion flags (avoid repeated coordinator polling after global completion)
@@ -524,13 +559,23 @@ class RolloutDrafterManager:
     async def initialize(self):
         """Initialize communication system."""
         if self.is_coordinator:
-            # Start coordinator on rank 0
+            # Start coordinator in a dedicated thread with its own event loop to avoid blocking
             port = get_free_port()
             self.coordinator = CentralCoordinator(port, tp_size=self.tp_size)
-            self.coordinator_task = asyncio.create_task(self.coordinator.run())
 
-            # Give coordinator time to start listening
-            await asyncio.sleep(0.5)
+            def _run_coordinator_loop():
+                try:
+                    loop = asyncio.new_event_loop()
+                    asyncio.set_event_loop(loop)
+                    loop.run_until_complete(self.coordinator.run())
+                except Exception as e:
+                    logger.error(f"Coordinator thread crashed: {e}")
+
+            self._coord_thread = threading.Thread(target=_run_coordinator_loop, name="CoordinatorThread", daemon=True)
+            self._coord_thread.start()
+
+            # Give coordinator thread time to bind the socket
+            await asyncio.sleep(0.2)
 
             # Broadcast coordinator address to all workers
             coordinator_address = f"tcp://{get_host_ip()}:{port}"
@@ -1132,10 +1177,14 @@ class RolloutDrafterManager:
 
         # Shutdown coordinator quickly if we're the coordinator
         if self.is_coordinator and self.coordinator:
-            if self.coordinator_task:
-                self.coordinator_task.cancel()
-                await asyncio.wait_for(self.coordinator_task, timeout=0.5)
-            await self.coordinator.cleanup()
+            # Signal stop and join thread quickly
+            try:
+                self.coordinator.stop()
+            except Exception:
+                pass
+            if self._coord_thread and self._coord_thread.is_alive():
+                # Allow a short grace period
+                self._coord_thread.join(timeout=0.5)
 
         # Clean up worker client communication - but don't wait too long
         if self.worker_client:
